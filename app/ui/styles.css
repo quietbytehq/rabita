@@ -1,0 +1,33 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Design tokens from the approved mockups. Full wizard styling lands in Milestone 3. */
+:root {
+  --bg-window: #0f1730;
+  --bg-banner: #0a1024;
+  --bg-panel: #111a36;
+  --border: #22305c;
+  --border-strong: #3a4a80;
+  --text: #e8ecf7;
+  --text-muted: #a9b4d0;
+  --accent: #ffb320;
+  --accent-text: #1a1300;
+  --font: "Manrope", system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg-window);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+.placeholder {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+
+.muted {
+  color: var(--text-muted);
+}
