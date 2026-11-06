@@ -19,7 +19,7 @@ consume them directly and the interface stays stable while the structures grow.
 | `Status()` | – | `s` JSON `StatusReport` | no | Membership, sssd config/service, keytab, Kerberos ticket, DC reachability, clock, home dirs, user lookup |
 | `Join(request s, password s)` | JSON `JoinRequest`, admin password | `u` job id | **yes** | Returns at once; progress via signals |
 | `Leave(request s, password s)` | JSON `LeaveRequest`, password (empty unless removing the computer account) | `u` job id | **yes** | Restores every backed-up file |
-| `ApplyOptions(options s)` | JSON `JoinOptions` | `u` job id | **yes** | Re-applies home-folder and login-screen options |
+| `ApplyOptions(options s)` | JSON `JoinOptions` | `u` job id | **yes** | Re-applies who-can-sign-in, home-folder and login-screen options |
 
 Privileged methods check `org.quietbyte.rabita.manage` with
 `AllowUserInteraction`, so the desktop shows the normal authentication dialog.
@@ -50,7 +50,25 @@ missed.
 
 ## Join steps (ids used in `Progress`)
 
-`detect`, `packages`, `time`, `join`, `sssd`, `home`, `display`, `verify`.
+`detect`, `packages`, `time`, `join`, `sssd`, `access`, `home`, `display`, `verify`.
+
+## Options (`JoinOptions`, also the body of `ApplyOptions`)
+
+```json
+{
+  "manual_login": true,
+  "create_home": true,
+  "offline_login": true,
+  "login_access": { "mode": "all" }
+}
+```
+
+`login_access` is either `{"mode":"all"}` (every domain user may sign in,
+the default) or `{"mode":"groups","groups":["Linux Users","Staff"]}` (only
+members of those AD groups). Group mode runs `realm deny --all` followed by
+`realm permit -g <groups…>`, so the list is exact each time it is applied; a
+group list that is empty after trimming is rejected before anything changes.
+`Status` reports the current setting in the `login-access` check.
 
 ## Leave steps
 

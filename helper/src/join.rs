@@ -9,9 +9,10 @@
 //! 3. time     — find the domain controllers and check the clock
 //! 4. join     — `realm join` with the admin password on stdin
 //! 5. sssd     — plain usernames, offline login, `/home/<user>`
-//! 6. home     — create home folders on first login
-//! 7. display  — username box on the login screen
-//! 8. verify   — Kerberos ticket from the machine keytab, user lookup
+//! 6. access   — who may sign in (everyone, or only listed groups)
+//! 7. home     — create home folders on first login
+//! 8. display  — username box on the login screen
+//! 9. verify   — Kerberos ticket from the machine keytab, user lookup
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ use crate::paths::Paths;
 use crate::progress::{ProgressSink, Reporter};
 use crate::sntp;
 use crate::system;
-use crate::types::{JobResult, JoinRequest, StepState};
+use crate::types::{JobResult, JoinRequest, LoginAccess, StepState};
 
 /// Everything a job needs from its surroundings.
 pub struct JobContext<'a> {
@@ -214,6 +215,46 @@ pub fn configure_sssd_text(text: &str, domain: &str, offline_login: bool) -> Str
     doc.render()
 }
 
+/// Actions that set who may sign in, via `realm permit` / `realm deny`.
+///
+/// For a group list the previous permissions are cleared first
+/// (`realm deny --all`) so the list is exact, not additive.
+pub fn login_access_actions(access: &LoginAccess) -> Result<Vec<Action>, StepError> {
+    match access {
+        LoginAccess::All => Ok(vec![Action::run(
+            "Allow all domain users to sign in",
+            "realm",
+            &["permit", "--all"],
+        )]),
+        LoginAccess::Groups { groups } => {
+            let groups: Vec<&str> = groups
+                .iter()
+                .map(|g| g.trim())
+                .filter(|g| !g.is_empty())
+                .collect();
+            if groups.is_empty() {
+                return Err(StepError::from(
+                    "Enter at least one group, or choose 'All domain users'.",
+                ));
+            }
+            let mut args = vec!["permit", "-g"];
+            args.extend(groups.iter().copied());
+            Ok(vec![
+                Action::run(
+                    "Clear previous sign-in permissions",
+                    "realm",
+                    &["deny", "--all"],
+                ),
+                Action::run(
+                    &format!("Allow only these groups to sign in: {}", groups.join(", ")),
+                    "realm",
+                    &args,
+                ),
+            ])
+        }
+    }
+}
+
 /// Reads the first `host/` or machine-account principal from `klist -k`.
 #[must_use]
 pub fn keytab_principal(klist_output: &str) -> Option<String> {
@@ -269,12 +310,13 @@ impl Steps<'_> {
     }
 }
 
-const JOIN_STEPS: [(&str, &str); 8] = [
+const JOIN_STEPS: [(&str, &str); 9] = [
     ("detect", "Check this computer"),
     ("packages", "Install domain login software"),
     ("time", "Find the domain and check the clock"),
     ("join", "Join the domain"),
     ("sssd", "Set up sign-in"),
+    ("access", "Choose who can sign in"),
     ("home", "Create home folders on first login"),
     ("display", "Show a username box on the login screen"),
     ("verify", "Check that it works"),
@@ -335,6 +377,15 @@ fn join_inner(
             Err(StepError::from("Enter the administrator account name."))
         })?;
     }
+    let access_actions = match login_access_actions(&req.options.login_access) {
+        Ok(a) => a,
+        Err(e) => {
+            steps.run("detect", JOIN_STEPS[0].1, |_| {
+                Err::<(StepState, String, ()), _>(e)
+            })?;
+            unreachable!("step failure returns early")
+        }
+    };
 
     // 1. detect
     let (info, backend) = steps.run("detect", JOIN_STEPS[0].1, |r| {
@@ -362,10 +413,12 @@ fn join_inner(
         ))
     })?;
 
+    let mut options = req.options.clone();
+    options.login_access = options.login_access.normalised();
     let mut state = State {
         domain: Some(domain.clone()),
         realm: Some(realm.clone()),
-        options: req.options.clone(),
+        options,
         verify_user: req.verify_user.clone(),
         ..State::default()
     };
@@ -583,12 +636,25 @@ fn join_inner(
         Ok((StepState::Done, "Sign-in configured.".to_owned(), ()))
     })?;
 
-    // 6. home
+    // 6. access
+    steps.run("access", JOIN_STEPS[5].1, |r| {
+        execute_actions(
+            ctx,
+            &store,
+            &mut state,
+            r,
+            &access_actions,
+            Duration::from_secs(120),
+        )?;
+        Ok((StepState::Done, state.options.login_access.describe(), ()))
+    })?;
+
+    // 7. home
     let facts = SystemFacts {
         mkhomedir_already_enabled: state.mkhomedir_was_enabled,
         ..system::gather_facts(ctx.paths)
     };
-    steps.run("home", JOIN_STEPS[5].1, |r| {
+    steps.run("home", JOIN_STEPS[6].1, |r| {
         if !req.options.create_home {
             return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
         }
@@ -615,8 +681,8 @@ fn join_inner(
         ))
     })?;
 
-    // 7. display
-    steps.run("display", JOIN_STEPS[6].1, |r| {
+    // 8. display
+    steps.run("display", JOIN_STEPS[7].1, |r| {
         if !req.options.manual_login {
             return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
         }
@@ -645,8 +711,8 @@ fn join_inner(
         .save(&state)
         .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
 
-    // 8. verify
-    steps.run("verify", JOIN_STEPS[7].1, |r| {
+    // 9. verify
+    steps.run("verify", JOIN_STEPS[8].1, |r| {
         let mut notes = Vec::new();
         let klist = ctx
             .runner
@@ -891,11 +957,115 @@ KVNO Principal
         let ids: Vec<&str> = result.steps.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["detect", "packages", "time", "join", "sssd", "home", "display", "verify"]
+            ["detect", "packages", "time", "join", "sssd", "access", "home", "display", "verify"]
         );
         assert_eq!(result.steps[1].state, StepState::Skipped); // packages present
-        assert_eq!(result.steps[6].state, StepState::Skipped); // no DM
-        assert_eq!(result.steps[7].state, StepState::Done);
+        assert_eq!(result.steps[5].state, StepState::Done);
+        assert_eq!(result.steps[5].message, "All domain users");
+        assert!(lines.contains(&"realm permit --all".to_owned()));
+        assert_eq!(result.steps[7].state, StepState::Skipped); // no DM
+        assert_eq!(result.steps[8].state, StepState::Done);
+    }
+
+    #[test]
+    fn group_restricted_login_uses_realm_permit() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .ok("realm join", "")
+            .ok("klist", KLIST);
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: false,
+        };
+        let mut req = request();
+        req.verify_user = None;
+        req.options.login_access = LoginAccess::Groups {
+            groups: vec!["Linux Users".into(), " Staff ".into()],
+        };
+        let result = run_join(&ctx, &req, Zeroizing::new("pw".into()));
+        assert!(result.ok, "{}", result.summary);
+        let lines = fake.call_lines();
+        let deny = lines
+            .iter()
+            .position(|l| l == "realm deny --all")
+            .expect("realm deny --all");
+        let permit = lines
+            .iter()
+            .position(|l| l == "realm permit -g Linux Users Staff")
+            .expect("realm permit -g");
+        assert!(deny < permit, "deny must come before permit");
+        let sssd_restart = lines
+            .iter()
+            .position(|l| l == "systemctl restart sssd")
+            .unwrap();
+        assert!(
+            sssd_restart < deny,
+            "sssd must be configured before permissions"
+        );
+        assert!(!lines.contains(&"realm permit --all".to_owned()));
+        // The group name with a space is one argument, not two.
+        let permit_call = fake
+            .calls()
+            .into_iter()
+            .find(|c| c.args.first().is_some_and(|a| a == "permit"))
+            .unwrap();
+        assert_eq!(permit_call.args, ["permit", "-g", "Linux Users", "Staff"]);
+        let access = result.steps.iter().find(|s| s.id == "access").unwrap();
+        assert_eq!(access.message, "Only these groups: Linux Users, Staff");
+        let state = Store::new(paths).load().unwrap();
+        assert_eq!(
+            state.options.login_access,
+            LoginAccess::Groups {
+                groups: vec!["Linux Users".into(), "Staff".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn empty_group_list_is_rejected_before_any_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: false,
+        };
+        let mut req = request();
+        req.options.login_access = LoginAccess::Groups {
+            groups: vec!["  ".into()],
+        };
+        let result = run_join(&ctx, &req, Zeroizing::new("pw".into()));
+        assert!(!result.ok);
+        assert_eq!(
+            result.summary,
+            "Enter at least one group, or choose 'All domain users'."
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "nothing may run: {:?}",
+            fake.call_lines()
+        );
+    }
+
+    #[test]
+    fn login_access_actions_shapes() {
+        let all = login_access_actions(&LoginAccess::All).unwrap();
+        assert_eq!(all.len(), 1);
+        let groups = login_access_actions(&LoginAccess::Groups {
+            groups: vec!["A".into()],
+        })
+        .unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(login_access_actions(&LoginAccess::Groups { groups: vec![] }).is_err());
     }
 
     #[test]

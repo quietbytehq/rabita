@@ -20,7 +20,9 @@ use rabita_helper::cmd::SystemRunner;
 use rabita_helper::join::JobContext;
 use rabita_helper::paths::Paths;
 use rabita_helper::progress::{FnSink, ProgressEvent};
-use rabita_helper::types::{JobResult, JoinOptions, JoinRequest, LeaveRequest, StepState};
+use rabita_helper::types::{
+    JobResult, JoinOptions, JoinRequest, LeaveRequest, LoginAccess, StepState,
+};
 use rabita_helper::{discover, join, leave, status, system, VERSION};
 use zeroize::Zeroizing;
 
@@ -78,6 +80,10 @@ enum Command {
         /// Do not cache passwords for offline login.
         #[arg(long)]
         no_offline_login: bool,
+        /// Only let members of this domain group sign in (repeat for more
+        /// groups). Without it, all domain users may sign in.
+        #[arg(long = "allow-group", value_name = "GROUP")]
+        allow_groups: Vec<String>,
         /// Read the password from standard input (first line) instead of prompting.
         #[arg(long)]
         password_stdin: bool,
@@ -102,6 +108,10 @@ enum Command {
         /// Create home folders on first login.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         create_home: bool,
+        /// Only let members of this domain group sign in (repeat for more
+        /// groups). Without it, all domain users may sign in.
+        #[arg(long = "allow-group", value_name = "GROUP")]
+        allow_groups: Vec<String>,
     },
     /// Print every signal the helper emits until Ctrl-C (D-Bus mode only).
     Watch,
@@ -187,6 +197,7 @@ fn join_request(cmd: &Command) -> Option<(JoinRequest, bool)> {
         no_manual_login,
         no_create_home,
         no_offline_login,
+        allow_groups,
         password_stdin,
     } = cmd
     {
@@ -201,6 +212,7 @@ fn join_request(cmd: &Command) -> Option<(JoinRequest, bool)> {
                     manual_login: !no_manual_login,
                     create_home: !no_create_home,
                     offline_login: !no_offline_login,
+                    login_access: LoginAccess::from_groups(allow_groups),
                 },
             },
             *password_stdin,
@@ -263,10 +275,12 @@ fn run_direct(cli: &Cli) -> Result<(), String> {
         Command::ApplyOptions {
             manual_login,
             create_home,
+            allow_groups,
         } => {
             let opts = JoinOptions {
                 manual_login: *manual_login,
                 create_home: *create_home,
+                login_access: LoginAccess::from_groups(allow_groups),
                 ..JoinOptions::default()
             };
             let result = rabita_helper::service::apply_options_job(&ctx, &opts);
@@ -404,10 +418,12 @@ async fn run_dbus(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::ApplyOptions {
             manual_login,
             create_home,
+            allow_groups,
         } => {
             let opts = JoinOptions {
                 manual_login: *manual_login,
                 create_home: *create_home,
+                login_access: LoginAccess::from_groups(allow_groups),
                 ..JoinOptions::default()
             };
             let stream = signal_stream(&proxy).await?;

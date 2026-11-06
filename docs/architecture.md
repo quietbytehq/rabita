@@ -48,7 +48,7 @@ Rabita is three programs in one repository. Only one of them runs as root.
 | `Join`           | yes          | Install packages, `realm join`, configure SSSD/PAM |
 | `Leave`          | yes          | `realm leave`, restore backed-up configs           |
 | `Status`         | no           | Joined?, DC, health checks                         |
-| `ApplyOptions`   | yes          | Re-apply wizard options without re-joining         |
+| `ApplyOptions`   | yes          | Re-apply wizard options (who can sign in, home folders, login screen) |
 
 `Join`, `Leave` and `ApplyOptions` return a job id immediately and stream
 `Progress(job, step, state, message)`, `LogLine(job, line)` and

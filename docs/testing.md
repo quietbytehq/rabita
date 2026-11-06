@@ -118,8 +118,9 @@ rabitactl join lab.quietbyte.test --user joiner --ou "OU=Linux PCs,DC=lab,DC=qui
 
 Run the same command with the correct password.
 
-- [ ] All eight steps end `OK` or `--` (skipped), then `SUCCESS` and
+- [ ] All nine steps end `OK` or `--` (skipped), then `SUCCESS` and
       *This computer is now connected to lab.quietbyte.test.*
+- [ ] The "Choose who can sign in" step says *All domain users*.
 - [ ] Terminal 1 shows no errors.
 - [ ] Verify step reports *Kerberos ticket OK; user 'amna' found*.
 
@@ -163,6 +164,41 @@ If the "Not listed?" link does not appear, note it and tell the developer
 (the GDM dconf profile may need a different path on this Ubuntu release).
 Workaround for the test: press the username box after clicking any user name
 and use the "Login" entry, or test on a LightDM session.
+
+### 5b. Restrict sign-in to groups
+
+On the DC, create a security group `Linux Users` and make sure `amna` is
+**not** in it yet. Pick a second test user who **is** in it (below: `bilal`).
+
+```bash
+rabitactl apply-options --allow-group "Linux Users"
+```
+
+- [ ] `SUCCESS`; the "Choose who can sign in" step says
+      *Only these groups: Linux Users*.
+- [ ] `rabitactl status` shows the "Who can sign in" check as
+      *Only these groups: Linux Users*.
+- [ ] `sudo realm list` shows `login-policy: allow-permitted-logins` and
+      `permitted-groups: Linux Users`.
+- [ ] Log out. Logging in as `amna` is **refused** (GDM shows an error; the
+      helper log in terminal 1 is unaffected). Logging in as `bilal` works.
+- [ ] Add `amna` to `Linux Users` on the DC, then on the VM run
+      `sudo sss_cache -E` and wait a minute: `amna` can log in again.
+
+Switch back to everyone:
+
+```bash
+rabitactl apply-options
+```
+
+- [ ] The step says *All domain users*; `rabitactl status` agrees; `sudo realm
+      list` shows `login-policy: allow-realm-logins`.
+- [ ] A join can also start restricted:
+      `rabitactl join lab.quietbyte.test --user joiner --allow-group "Linux Users" --allow-group Staff`
+      (run this variant on a fresh snapshot if you want to confirm it; the
+      "Choose who can sign in" step should say *Only these groups: Linux Users, Staff*).
+- [ ] `rabitactl apply-options --allow-group " "` is rejected with *Enter at
+      least one group, or choose 'All domain users'.* and nothing changes.
 
 ### 6. Options and idempotence
 
@@ -229,9 +265,10 @@ Then restore the VM snapshot.
 
 - SDDM (KDE) gets no login-screen change yet; most SDDM themes already offer
   "Other".
-- `ad_gpo_access_control` is set to `permissive`, so AD users can log in even
-  if no GPO grants "Allow log on locally" to Linux machines. Decide with the
-  owner whether v1 should expose this as an option.
+- Who may sign in is now a choice (all domain users, or only listed groups).
+  Separately, `ad_gpo_access_control` is set to `permissive`, so Windows
+  "Allow log on locally" GPOs are not enforced on Linux machines; the group
+  list above is the way to restrict access.
 - Fedora, openSUSE and Arch backends are placeholders (Milestone 7).
 
 ## Milestone 3 — wizard GUI

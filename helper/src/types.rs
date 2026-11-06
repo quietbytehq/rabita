@@ -68,6 +68,65 @@ pub struct DiscoveryResult {
     pub problem: Option<String>,
 }
 
+/// Who may sign in to this computer with a domain account.
+///
+/// JSON: `{"mode":"all"}` or `{"mode":"groups","groups":["Linux Users"]}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum LoginAccess {
+    /// Every user in the domain (the default).
+    #[default]
+    All,
+    /// Only members of these domain groups (names as shown in AD, e.g.
+    /// `Linux Users` or `Staff`).
+    Groups {
+        /// Group names.
+        groups: Vec<String>,
+    },
+}
+
+impl LoginAccess {
+    /// Builds the option from a CLI/GUI list: an empty list means everyone.
+    #[must_use]
+    pub fn from_groups(groups: &[String]) -> Self {
+        let groups: Vec<String> = groups
+            .iter()
+            .map(|g| g.trim().to_owned())
+            .filter(|g| !g.is_empty())
+            .collect();
+        if groups.is_empty() {
+            Self::All
+        } else {
+            Self::Groups { groups }
+        }
+    }
+
+    /// The same choice with group names trimmed and blanks removed. A list
+    /// that ends up empty stays `Groups` so validation can reject it.
+    #[must_use]
+    pub fn normalised(&self) -> Self {
+        match self {
+            Self::All => Self::All,
+            Self::Groups { groups } => Self::Groups {
+                groups: groups
+                    .iter()
+                    .map(|g| g.trim().to_owned())
+                    .filter(|g| !g.is_empty())
+                    .collect(),
+            },
+        }
+    }
+
+    /// Plain-language description for status and logs.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::All => "All domain users".to_owned(),
+            Self::Groups { groups } => format!("Only these groups: {}", groups.join(", ")),
+        }
+    }
+}
+
 /// Options the wizard offers on the "Choose options" screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +137,8 @@ pub struct JoinOptions {
     pub create_home: bool,
     /// Keep cached passwords so people can log in offline.
     pub offline_login: bool,
+    /// Who may sign in: everyone, or only listed groups.
+    pub login_access: LoginAccess,
 }
 
 impl Default for JoinOptions {
@@ -86,6 +147,7 @@ impl Default for JoinOptions {
             manual_login: true,
             create_home: true,
             offline_login: true,
+            login_access: LoginAccess::All,
         }
     }
 }
@@ -220,6 +282,52 @@ mod tests {
         assert!(req.options.manual_login);
         assert!(req.options.create_home);
         assert!(req.options.offline_login);
+        assert_eq!(req.options.login_access, LoginAccess::All);
+    }
+
+    #[test]
+    fn login_access_json_shapes() {
+        let all: LoginAccess = serde_json::from_str(r#"{"mode":"all"}"#).unwrap();
+        assert_eq!(all, LoginAccess::All);
+        let groups: LoginAccess =
+            serde_json::from_str(r#"{"mode":"groups","groups":["Linux Users","Staff"]}"#).unwrap();
+        assert_eq!(
+            groups,
+            LoginAccess::Groups {
+                groups: vec!["Linux Users".into(), "Staff".into()]
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&LoginAccess::All).unwrap(),
+            r#"{"mode":"all"}"#
+        );
+        let opts: JoinOptions =
+            serde_json::from_str(r#"{"login_access":{"mode":"groups","groups":["Staff"]}}"#)
+                .unwrap();
+        assert!(opts.manual_login, "other fields keep their defaults");
+        assert_eq!(opts.login_access.describe(), "Only these groups: Staff");
+        let messy = LoginAccess::Groups {
+            groups: vec![" A ".into(), String::new(), "B".into()],
+        };
+        assert_eq!(
+            messy.normalised(),
+            LoginAccess::Groups {
+                groups: vec!["A".into(), "B".into()]
+            }
+        );
+        assert_eq!(LoginAccess::All.normalised(), LoginAccess::All);
+    }
+
+    #[test]
+    fn login_access_from_groups_ignores_blanks() {
+        assert_eq!(LoginAccess::from_groups(&[]), LoginAccess::All);
+        assert_eq!(LoginAccess::from_groups(&[" ".into()]), LoginAccess::All);
+        assert_eq!(
+            LoginAccess::from_groups(&[" Linux Users ".into(), String::new()]),
+            LoginAccess::Groups {
+                groups: vec!["Linux Users".into()]
+            }
+        );
     }
 
     #[test]

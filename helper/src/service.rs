@@ -288,14 +288,12 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
         ..system::gather_facts(ctx.paths)
     };
     let joined = state.joined;
-    let mut ok = true;
-    let mut failure = String::new();
 
     let mut apply = |id: &str, label: &str, actions: Vec<rabita_backends::Action>| {
         r.step(id, label, StepState::Running, "");
         if actions.is_empty() {
             r.step(id, label, StepState::Skipped, "No change needed.");
-            return;
+            return Ok(());
         }
         match join::execute_actions(
             ctx,
@@ -303,19 +301,25 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
             &mut state,
             &r,
             &actions,
-            Duration::from_secs(60),
+            Duration::from_secs(120),
         ) {
-            Ok(()) => r.step(id, label, StepState::Done, "Done."),
+            Ok(()) => {
+                r.step(id, label, StepState::Done, "Done.");
+                Ok(())
+            }
             Err(e) => {
-                ok = false;
-                failure.clone_from(&e.0);
                 r.step(id, label, StepState::Failed, &e.0);
+                Err(e)
             }
         }
     };
 
-    match &backend {
-        Some(b) if joined => {
+    let outcome: Result<(), join::StepError> = match &backend {
+        Some(b) if joined => (|| {
+            let access = join::login_access_actions(&opts.login_access).inspect_err(|e| {
+                r.step("access", "Choose who can sign in", StepState::Failed, &e.0);
+            })?;
+            apply("access", "Choose who can sign in", access)?;
             apply(
                 "home",
                 "Create home folders on first login",
@@ -324,7 +328,7 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
                 } else {
                     b.disable_login_integration(&facts)
                 },
-            );
+            )?;
             apply(
                 "display",
                 "Show a username box on the login screen",
@@ -333,11 +337,23 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
                 } else {
                     b.disable_manual_login(&facts)
                 },
-            );
-        }
-        _ => {
+            )
+        })(),
+        _ => Err(join::StepError::from(
+            "This computer is not connected to a domain yet.",
+        )),
+    };
+    drop(apply);
+    let (mut ok, mut failure) = match outcome {
+        Ok(()) => (true, String::new()),
+        Err(e) => (false, e.0),
+    };
+    if ok {
+        state.options = opts.clone();
+        state.options.login_access = opts.login_access.normalised();
+        if let Err(e) = store.save(&state) {
             ok = false;
-            "This computer is not connected to a domain yet.".clone_into(&mut failure);
+            failure = format!("Could not save Rabita's state: {e}");
         }
     }
     JobResult {
@@ -348,5 +364,115 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
             failure
         },
         steps: collector.outcomes(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::apply_options_job;
+    use crate::backup::{State, Store};
+    use crate::cmd::FakeRunner;
+    use crate::join::JobContext;
+    use crate::paths::Paths;
+    use crate::progress::Collector;
+    use crate::types::{JoinOptions, LoginAccess, StepState};
+
+    fn joined_lab(dir: &Path) -> Paths {
+        let paths = Paths::under(dir);
+        let p = paths.os_release();
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, "ID=ubuntu\nID_LIKE=debian\nPRETTY_NAME=Ubuntu\n").unwrap();
+        Store::new(paths.clone())
+            .save(&State {
+                domain: Some("lab.test".into()),
+                joined: true,
+                mkhomedir_was_enabled: true,
+                ..State::default()
+            })
+            .unwrap();
+        paths
+    }
+
+    #[test]
+    fn apply_options_restricts_and_reopens_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = joined_lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "lab.test\n  configured: kerberos-member\n");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: false,
+        };
+        let opts = JoinOptions {
+            login_access: LoginAccess::Groups {
+                groups: vec!["Linux Users".into()],
+            },
+            ..JoinOptions::default()
+        };
+        let result = apply_options_job(&ctx, &opts);
+        assert!(result.ok, "{}", result.summary);
+        let lines = fake.call_lines();
+        assert!(lines.contains(&"realm deny --all".to_owned()));
+        assert!(lines.contains(&"realm permit -g Linux Users".to_owned()));
+        assert_eq!(
+            Store::new(paths.clone())
+                .load()
+                .unwrap()
+                .options
+                .login_access,
+            opts.login_access
+        );
+        let access = result.steps.iter().find(|s| s.id == "access").unwrap();
+        assert_eq!(access.state, StepState::Done);
+
+        let result = apply_options_job(&ctx, &JoinOptions::default());
+        assert!(result.ok, "{}", result.summary);
+        assert!(fake.call_lines().contains(&"realm permit --all".to_owned()));
+        assert_eq!(
+            Store::new(paths).load().unwrap().options.login_access,
+            LoginAccess::All
+        );
+    }
+
+    #[test]
+    fn apply_options_rejects_empty_groups_and_unjoined_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = joined_lab(dir.path());
+        let fake = FakeRunner::new();
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: false,
+        };
+        let opts = JoinOptions {
+            login_access: LoginAccess::Groups { groups: vec![] },
+            ..JoinOptions::default()
+        };
+        let result = apply_options_job(&ctx, &opts);
+        assert!(!result.ok);
+        assert!(result.summary.starts_with("Enter at least one group"));
+        assert!(!fake.call_lines().iter().any(|l| l.starts_with("realm")));
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let paths2 = Paths::under(dir2.path());
+        let ctx2 = JobContext {
+            runner: &fake,
+            paths: &paths2,
+            sink: &collector,
+            network: false,
+        };
+        let result = apply_options_job(&ctx2, &JoinOptions::default());
+        assert!(!result.ok);
+        assert!(result.summary.contains("not connected"));
+        let _ = Arc::new(());
     }
 }

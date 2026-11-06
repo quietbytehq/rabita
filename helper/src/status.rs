@@ -47,6 +47,43 @@ pub fn format_rfc3339(secs: u64) -> String {
     )
 }
 
+/// Reads who may sign in from `sssd.conf`, as `realm permit` wrote it.
+#[must_use]
+pub fn describe_login_access(doc: &IniDocument, section: Option<&str>) -> String {
+    let Some(section) = section else {
+        return "All domain users".to_owned();
+    };
+    let provider = doc
+        .get(section, "access_provider")
+        .unwrap_or_else(|| "ad".to_owned())
+        .to_ascii_lowercase();
+    if provider != "simple" {
+        return "All domain users".to_owned();
+    }
+    let groups = doc.get(section, "simple_allow_groups").unwrap_or_default();
+    let users = doc.get(section, "simple_allow_users").unwrap_or_default();
+    let groups: Vec<&str> = groups
+        .split(',')
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .collect();
+    let users: Vec<&str> = users
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect();
+    match (groups.is_empty(), users.is_empty()) {
+        (true, true) => "Nobody (no groups or users permitted)".to_owned(),
+        (false, true) => format!("Only these groups: {}", groups.join(", ")),
+        (true, false) => format!("Only these users: {}", users.join(", ")),
+        (false, false) => format!(
+            "Only these groups: {} (and users: {})",
+            groups.join(", "),
+            users.join(", ")
+        ),
+    }
+}
+
 /// Builds the status report. `probe` enables network checks.
 #[must_use]
 #[allow(clippy::too_many_lines)] // one check after another
@@ -103,6 +140,7 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
     // sssd config and the DC it points at.
     let conf_text = std::fs::read_to_string(paths.sssd_conf()).ok();
     let mut dc = state.domain_controller.clone();
+    let mut login_access_detail = None;
     match &conf_text {
         Some(text) => {
             let doc = IniDocument::parse(text);
@@ -114,6 +152,7 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
             if let Some(server) = section.as_ref().and_then(|s| doc.get(s, "ad_server")) {
                 dc = Some(server);
             }
+            login_access_detail = Some(describe_login_access(&doc, section.as_deref()));
             checks.push(check(
                 "sssd-config",
                 "Sign-in configuration",
@@ -131,6 +170,10 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
             Some(false),
             "/etc/sssd/sssd.conf is missing",
         )),
+    }
+
+    if let Some(detail) = login_access_detail {
+        checks.push(check("login-access", "Who can sign in", Some(true), detail));
     }
 
     // sssd service
@@ -387,6 +430,7 @@ mod tests {
             [
                 "membership",
                 "sssd-config",
+                "login-access",
                 "sssd-service",
                 "keytab",
                 "kerberos",
@@ -395,5 +439,25 @@ mod tests {
                 "user-lookup"
             ]
         );
+        assert_eq!(rep.checks[2].detail, "All domain users");
+    }
+
+    #[test]
+    fn describes_login_access_from_sssd_conf() {
+        let all = IniDocument::parse("[domain/x]\naccess_provider = ad\n");
+        assert_eq!(
+            describe_login_access(&all, Some("domain/x")),
+            "All domain users"
+        );
+        let groups = IniDocument::parse(
+            "[domain/x]\naccess_provider = simple\nsimple_allow_groups = Linux Users, Staff\n",
+        );
+        assert_eq!(
+            describe_login_access(&groups, Some("domain/x")),
+            "Only these groups: Linux Users, Staff"
+        );
+        let nobody = IniDocument::parse("[domain/x]\naccess_provider = simple\n");
+        assert!(describe_login_access(&nobody, Some("domain/x")).starts_with("Nobody"));
+        assert_eq!(describe_login_access(&all, None), "All domain users");
     }
 }
