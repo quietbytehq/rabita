@@ -1,0 +1,20 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Node / frontend
+node_modules/
+app/ui/dist/
+app/src-tauri/gen/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local secrets or lab configs must never be committed
+*.secret
+*.keytab
+lab.local.*

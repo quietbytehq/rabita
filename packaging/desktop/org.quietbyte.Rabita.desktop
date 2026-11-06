@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+[Desktop Entry]
+Type=Application
+Name=Rabita Setup
+Comment=Connect this computer to your organization
+Exec=rabita-app
+Icon=org.quietbyte.Rabita
+Terminal=false
+Categories=System;Settings;
+Keywords=domain;login;network drive;printer;

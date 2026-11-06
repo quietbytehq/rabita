@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Rabita helper (joins this computer to your organization)
+Documentation=https://github.com/quietbytehq/rabita
+
+[Service]
+Type=dbus
+BusName=org.quietbyte.Rabita1
+ExecStart=/usr/libexec/rabita-helper
+# Hardening: the helper runs as root but should touch as little as possible.
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=no

@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Rabita workspace. Three deliverables share this workspace:
+#   helper/   rabita-helper  (root daemon on the system D-Bus, polkit-gated)
+#   agent/    rabita-agent   (per-user service started at login)
+#   app/      rabita-app     (Tauri 2 wizard GUI; Rust side lives in app/src-tauri)
+# plus one internal library:
+#   backends/ rabita-backends (per-distro logic compiled into the helper)
+
+[workspace]
+resolver = "2"
+members = [
+    "helper",
+    "agent",
+    "backends",
+    "app/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/quietbytehq/rabita"
+homepage = "https://github.com/quietbytehq/rabita"
+authors = ["QuietByte <https://github.com/quietbytehq>"]
+rust-version = "1.89"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

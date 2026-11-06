@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# D-Bus activation: starts rabita-helper on first call.
+[D-BUS Service]
+Name=org.quietbyte.Rabita1
+Exec=/usr/libexec/rabita-helper
+User=root
+SystemdService=rabita-helper.service

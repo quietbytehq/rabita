@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "rabita-app"
+description = "Rabita Setup — the wizard GUI (Tauri 2). Unprivileged; talks to rabita-helper over D-Bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rabita-app"
+path = "src/main.rs"
+
+# Tauri 2 and the D-Bus client are added in Milestone 3. Keeping this crate
+# dependency-free for now means CI builds the whole workspace without the
+# WebKitGTK toolchain.
+[dependencies]

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "rabita-helper"
+description = "Root daemon on the system D-Bus that joins and leaves the domain (polkit-gated)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "rabita_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rabita-helper"
+path = "src/main.rs"
+
+[[bin]]
+name = "rabitactl"
+path = "src/bin/rabitactl.rs"
+
+[dependencies]
+rabita-backends = { path = "../backends" }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus_polkit = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+zeroize = "1"
+rpassword = "7"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tempfile = "3"

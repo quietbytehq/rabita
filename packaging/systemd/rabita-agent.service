@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# systemd *user* unit — installed to /usr/lib/systemd/user/ and started at login.
+[Unit]
+Description=Rabita agent (network drives and printers for your account)
+Documentation=https://github.com/quietbytehq/rabita
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rabita-agent
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
