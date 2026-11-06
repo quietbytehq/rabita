@@ -222,7 +222,7 @@ lab.quietbyte.test
         assert_eq!(entries[0].client_software.as_deref(), Some("sssd"));
         let not = parse_realm_list("other.test\n  configured: no\n");
         assert!(!not[0].is_member());
-        assert!(parse_realm_list("").is_empty());
+        assert_eq!(parse_realm_list(""), Vec::<RealmEntry>::new());
     }
 
     fn write(paths: &Paths, abs: &str, content: &str) {

@@ -306,8 +306,14 @@ mod tests {
             mkhomedir_already_enabled: true,
             ..SystemFacts::default()
         };
-        assert!(Debian.enable_login_integration(&facts).is_empty());
-        assert!(Debian.disable_login_integration(&facts).is_empty());
+        assert_eq!(
+            Debian.enable_login_integration(&facts),
+            Vec::<Action>::new()
+        );
+        assert_eq!(
+            Debian.disable_login_integration(&facts),
+            Vec::<Action>::new()
+        );
     }
 
     #[test]
