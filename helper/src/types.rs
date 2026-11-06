@@ -51,6 +51,15 @@ pub struct DomainController {
     pub reachable: bool,
     /// Clock difference (DC minus this machine) in seconds, if measured.
     pub clock_offset_secs: Option<f64>,
+    /// Whether this DC serves the client's own AD site.
+    #[serde(default)]
+    pub in_client_site: bool,
+    /// Whether this is the DC Rabita will use (best ranked).
+    #[serde(default)]
+    pub recommended: bool,
+    /// Plain-language warning (unreachable, clock off, ...), if any.
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 /// Result of `DiscoverDomain`.
@@ -62,10 +71,24 @@ pub struct DiscoveryResult {
     pub realm: String,
     /// Whether at least one DC answered.
     pub found: bool,
-    /// Domain controllers, best first.
+    /// Domain controllers, best first: client site, then majority clock,
+    /// then smallest clock offset; unreachable ones last.
     pub controllers: Vec<DomainController>,
     /// Plain-language problem description when `found` is false.
     pub problem: Option<String>,
+    /// The client's AD site, when it could be determined (needs `adcli`).
+    #[serde(default)]
+    pub client_site: Option<String>,
+    /// Host of the recommended DC (the healthiest one), if any is reachable.
+    #[serde(default)]
+    pub recommended: Option<String>,
+    /// Clock offset (seconds) the majority of reachable DCs agree on, i.e.
+    /// how far this computer's clock is from the domain's real time.
+    #[serde(default)]
+    pub majority_clock_offset_secs: Option<f64>,
+    /// Plain-language warnings about stale records and clocks.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Who may sign in to this computer with a domain account.
@@ -249,6 +272,9 @@ pub struct HealthCheck {
     pub ok: Option<bool>,
     /// Plain-language detail.
     pub detail: String,
+    /// Passed, but worth attention (shown in amber).
+    #[serde(default)]
+    pub warning: bool,
 }
 
 /// Result of `Status`.

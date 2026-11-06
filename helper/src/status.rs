@@ -3,9 +3,6 @@
 
 //! `Status`: is this computer connected, and is everything healthy?
 
-use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
-
 use crate::backup::Store;
 use crate::cmd::{CommandSpec, Runner};
 use crate::ini::IniDocument;
@@ -20,7 +17,84 @@ fn check(id: &str, label: &str, ok: Option<bool>, detail: impl Into<String>) -> 
         label: label.to_owned(),
         ok,
         detail: detail.into(),
+        warning: false,
     }
+}
+
+/// Builds the domain-controller checks from a discovery result: whether the
+/// configured DC (or the best one) is reachable, plus warnings about stale
+/// records and bad clocks. Pure, so the lab scenario can be tested.
+#[must_use]
+pub fn dc_checks(
+    disc: &crate::types::DiscoveryResult,
+    configured: Option<&str>,
+) -> Vec<HealthCheck> {
+    let mut checks = Vec::new();
+    let configured_dc = configured.and_then(|h| {
+        disc.controllers
+            .iter()
+            .find(|c| c.host.eq_ignore_ascii_case(h))
+    });
+    let main = match (configured_dc, disc.recommended.as_deref()) {
+        (Some(c), _) if c.reachable => check(
+            "dc",
+            "Domain controller",
+            Some(true),
+            format!("{} is reachable", c.host),
+        ),
+        (Some(c), Some(best)) => {
+            let mut hc = check(
+                "dc",
+                "Domain controller",
+                Some(true),
+                format!("{} could not be reached; using {best} instead", c.host),
+            );
+            hc.warning = true;
+            hc
+        }
+        (Some(c), None) => check(
+            "dc",
+            "Domain controller",
+            Some(false),
+            format!("{} could not be reached", c.host),
+        ),
+        (None, Some(best)) => check(
+            "dc",
+            "Domain controller",
+            Some(true),
+            format!("{best} is reachable"),
+        ),
+        (None, None) => check(
+            "dc",
+            "Domain controller",
+            Some(false),
+            disc.problem
+                .clone()
+                .unwrap_or_else(|| "No domain controller could be reached".to_owned()),
+        ),
+    };
+    checks.push(main);
+    let reachable = disc.controllers.iter().filter(|c| c.reachable).count();
+    let mut health = check(
+        "dc-health",
+        "Domain controller health",
+        Some(true),
+        if disc.warnings.is_empty() {
+            format!(
+                "All {} domain controllers are reachable with good clocks",
+                disc.controllers.len()
+            )
+        } else {
+            format!(
+                "{reachable} of {} reachable. {}",
+                disc.controllers.len(),
+                disc.warnings.join(" ")
+            )
+        },
+    );
+    health.warning = !disc.warnings.is_empty();
+    checks.push(health);
+    checks
 }
 
 /// Formats a Unix timestamp as RFC 3339 (UTC) without external crates.
@@ -246,44 +320,14 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
         checks.push(check("kerberos", "Kerberos sign-in", None, "Not checked"));
     }
 
-    // DC reachability
+    // DC reachability and health (stale records, clocks)
     if probe {
-        let target = dc.clone().or_else(|| {
-            domain
-                .as_ref()
-                .map(|d| crate::discover::discover(d, paths, true))
-                .and_then(|r| {
-                    r.controllers
-                        .into_iter()
-                        .find(|c| c.reachable)
-                        .map(|c| c.host)
-                })
-        });
-        match target {
-            Some(host) => {
-                let reachable = format!("{host}:389").to_socket_addrs().is_ok_and(|mut a| {
-                    a.any(|a| TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok())
-                });
-                checks.push(check(
-                    "dc",
-                    "Domain controller",
-                    Some(reachable),
-                    if reachable {
-                        format!("{host} is reachable")
-                    } else {
-                        format!("{host} could not be reached")
-                    },
-                ));
-                if dc.is_none() {
-                    dc = Some(host);
-                }
+        if let Some(d) = &domain {
+            let disc = crate::discover::discover(d, runner, paths, true);
+            checks.extend(dc_checks(&disc, dc.as_deref()));
+            if dc.is_none() {
+                dc = disc.recommended;
             }
-            None => checks.push(check(
-                "dc",
-                "Domain controller",
-                Some(false),
-                "No domain controller found",
-            )),
         }
     }
 
@@ -440,6 +484,66 @@ mod tests {
             ]
         );
         assert_eq!(rep.checks[2].detail, "All domain users");
+    }
+
+    #[test]
+    fn dc_checks_flag_stale_records_and_bad_clocks() {
+        use crate::discover::rank_controllers;
+        use crate::types::{DiscoveryResult, DomainController};
+        let dc = |host: &str, reachable: bool, offset: Option<f64>| DomainController {
+            host: host.into(),
+            port: 389,
+            priority: 0,
+            weight: 100,
+            reachable,
+            clock_offset_secs: offset,
+            in_client_site: false,
+            recommended: false,
+            warning: None,
+        };
+        let mut controllers = vec![
+            dc("dc1.lab.test", true, Some(-162.0)),
+            dc("dc2.lab.test", false, None),
+            dc("dc3.lab.test", true, Some(180.0)),
+            dc("dc4.lab.test", false, None),
+            dc("dc5.lab.test", true, Some(2.0)),
+            dc("dc6.lab.test", false, None),
+            dc("dc7.lab.test", true, Some(-5.0)),
+            dc("dc8.lab.test", false, None),
+            dc("dc9.lab.test", true, Some(1.0)),
+        ];
+        let ranking = rank_controllers(&mut controllers, &[]);
+        let disc = DiscoveryResult {
+            domain: "lab.test".into(),
+            realm: "LAB.TEST".into(),
+            found: true,
+            controllers,
+            problem: None,
+            client_site: None,
+            recommended: ranking.recommended,
+            majority_clock_offset_secs: ranking.majority_offset,
+            warnings: ranking.warnings,
+        };
+        // Configured DC is one of the stale ones.
+        let checks = dc_checks(&disc, Some("dc2.lab.test"));
+        assert_eq!(checks[0].ok, Some(true));
+        assert!(checks[0].warning);
+        assert_eq!(
+            checks[0].detail,
+            "dc2.lab.test could not be reached; using dc9.lab.test instead"
+        );
+        assert_eq!(checks[1].id, "dc-health");
+        assert!(checks[1].warning);
+        assert!(checks[1].detail.starts_with(
+            "5 of 9 reachable. 4 of 9 domain controllers could not be reached (possibly stale DNS records)"
+        ));
+        assert!(checks[1]
+            .detail
+            .contains("dc1.lab.test (-162 s), dc3.lab.test (+180 s)"));
+        // Configured DC healthy.
+        let checks = dc_checks(&disc, Some("dc7.lab.test"));
+        assert_eq!(checks[0].detail, "dc7.lab.test is reachable");
+        assert!(!checks[0].warning);
     }
 
     #[test]

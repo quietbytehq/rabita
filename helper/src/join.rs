@@ -467,35 +467,60 @@ fn join_inner(
         if !ctx.network {
             return Ok((StepState::Skipped, "Network checks disabled.".to_owned(), None));
         }
-        let disc = discover::discover(&domain, ctx.paths, true);
+        let disc = discover::discover(&domain, ctx.runner, ctx.paths, true);
         if let Some(p) = &disc.problem {
-            if !disc.found || !disc.controllers.iter().any(|c| c.reachable) {
+            if disc.recommended.is_none() {
                 return Err(StepError(p.clone()));
             }
+        }
+        for w in &disc.warnings {
+            r.log(format!("Warning: {w}"));
         }
         let dc = disc
             .controllers
             .iter()
-            .find(|c| c.reachable)
+            .find(|c| c.recommended)
             .cloned()
             .ok_or("No domain controller could be reached.")?;
-        r.log(format!("Domain controller: {} (port {})", dc.host, dc.port));
-        let Some(offset) = dc.clock_offset_secs else {
+        if let Some(site) = &disc.client_site {
+            r.log(format!("This computer's site: {site}"));
+        }
+        r.log(format!(
+            "Using domain controller {} (port {}){}; {} of {} reachable",
+            dc.host,
+            dc.port,
+            if dc.in_client_site { ", in this computer's site" } else { "" },
+            disc.controllers.iter().filter(|c| c.reachable).count(),
+            disc.controllers.len()
+        ));
+        let suffix = if disc.warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} warning(s), see details)", disc.warnings.len())
+        };
+        let Some(offset) = disc.majority_clock_offset_secs else {
             return Ok((
                 StepState::Done,
-                format!("Found {}. Could not measure its clock (time port blocked); continuing.", dc.host),
+                format!(
+                    "Found {}. Could not measure the domain's clock (time port blocked); continuing.{suffix}",
+                    dc.host
+                ),
                 Some(dc.host.clone()),
             ));
         };
-        r.log(format!("Clock difference: {offset:.1} s"));
+        r.log(format!("Clock difference agreed by most domain controllers: {offset:.1} s"));
         if offset.abs() <= CLOCK_OK_SECS {
             return Ok((
                 StepState::Done,
-                format!("Found {}. Clock is within {:.0} s.", dc.host, offset.abs()),
+                format!("Found {}. Clock is within {:.0} s of the domain.{suffix}", dc.host, offset.abs()),
                 Some(dc.host.clone()),
             ));
         }
-        r.log("Clock is too far off; turning on time sync with the domain controller.");
+        r.log(format!(
+            "This computer's clock is {:.0} s off; turning on time sync with {}.",
+            offset.abs(),
+            dc.host
+        ));
         let ntp_actions = time_sync_actions(ctx.runner, &dc.host);
         execute_actions(ctx, &store, &mut state, r, &ntp_actions, Duration::from_secs(60))?;
         let deadline = Instant::now() + Duration::from_secs(45);
@@ -517,7 +542,7 @@ fn join_inner(
         }
         Ok((
             StepState::Done,
-            format!("Found {}. Clock corrected (now within {:.0} s).", dc.host, last.abs()),
+            format!("Found {}. Clock corrected (now within {:.0} s).{suffix}", dc.host, last.abs()),
             Some(dc.host.clone()),
         ))
     })?;
