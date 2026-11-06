@@ -16,6 +16,11 @@ Ubuntu · Debian · Linux Mint · Fedora · Red Hat · Rocky · openSUSE · Arch
 ## Status
 🚧 In development. First release (v0.1) coming soon.
 
+Done so far: the root helper (`rabita-helper`) joins and leaves a domain over
+D-Bus with polkit, and `rabitactl` drives it from the command line. The wizard
+GUI, drive mapping and printers are next. See `docs/testing.md` for how it is
+tested in the lab.
+
 ## How it works
 Rabita is a wizard and a small set of background services built on trusted open-source tools — SSSD, realmd, Kerberos, cifs-utils and CUPS. It doesn't replace your login screen; it teaches your system to recognise your organization's accounts. Every change it makes can be undone with **Leave domain**.
 

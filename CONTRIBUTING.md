@@ -30,6 +30,10 @@ cargo test --workspace
 scripts/check-spdx.sh
 ```
 
+```bash
+scripts/dbus-smoke.sh
+```
+
 ## Workflow
 
 Small commits with clear messages. One pull request per milestone (see `CLAUDE.md`).

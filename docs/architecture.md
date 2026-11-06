@@ -36,18 +36,43 @@ Rabita is three programs in one repository. Only one of them runs as root.
 | `rabita-app`      | `app/src-tauri/` | `rabita-app`    | Tauri 2 wizard                |
 | `rabita-backends` | `backends/`      | (library)       | Distro-specific steps         |
 
-## D-Bus interface (planned, Milestone 2)
+## D-Bus interface (Milestone 2)
 
-`org.quietbyte.Rabita1` at `/org/quietbyte/Rabita1`:
+`org.quietbyte.Rabita1` at `/org/quietbyte/Rabita1`, documented in full in
+[dbus-api.md](dbus-api.md):
 
 | Method           | Needs polkit | Purpose                                            |
 |------------------|--------------|----------------------------------------------------|
-| `DetectSystem`   | no           | Distro family, desktop, display manager            |
-| `DiscoverDomain` | no           | Find DCs for a domain name (DNS SRV)               |
+| `DetectSystem`   | no           | Distro family, display manager, joined?            |
+| `DiscoverDomain` | no           | Find DCs for a domain name (DNS SRV), probe them   |
 | `Join`           | yes          | Install packages, `realm join`, configure SSSD/PAM |
 | `Leave`          | yes          | `realm leave`, restore backed-up configs           |
-| `Status`         | no           | Joined?, DC, signed-in user, health checks         |
+| `Status`         | no           | Joined?, DC, health checks                         |
 | `ApplyOptions`   | yes          | Re-apply wizard options without re-joining         |
 
-Progress is streamed as a `Progress(step, state, message)` signal so the
-wizard's checklist updates live.
+`Join`, `Leave` and `ApplyOptions` return a job id immediately and stream
+`Progress(job, step, state, message)`, `LogLine(job, line)` and
+`JobFinished(job, ok, result_json)` signals so the wizard's checklist updates
+live and no D-Bus call waits on `apt-get`.
+
+## How the helper is built (so it stays auditable)
+
+- **Backends plan, the helper executes.** `rabita-backends` turns "install
+  packages" or "show a username box on the login screen" into a list of
+  `Action`s (run a command, write a file, remove a file). It never touches the
+  system. The helper runs the actions, backing up each file first.
+- **Every process goes through a `Runner`.** Unit tests use a scripted
+  `FakeRunner`, so `cargo test` never runs `realm`, `apt-get` or `systemctl`.
+- **All paths hang off a root.** Tests point the helper at a temporary
+  directory and exercise the real backup and restore code.
+- **State lives in `/var/lib/rabita/state.json`** (root only) with the list of
+  backups in `/var/lib/rabita/backups/<timestamp>/`. "Leave domain" walks that
+  list in reverse.
+
+## Lab tooling
+
+- `rabitactl` — CLI test harness; talks to the helper over D-Bus exactly like
+  the wizard. `--session` targets a helper started with `rabita-helper
+  --session`; `--direct` runs the library in-process (lab debugging only).
+- `scripts/dev-install.sh` / `dev-uninstall.sh` — install a development build
+  with its polkit and D-Bus files on a lab VM.

@@ -42,18 +42,23 @@ jobs:
         run: cargo build --workspace --all-targets --locked
       - name: test
         run: cargo test --workspace --locked
-      - name: smoke-run stubs
+      - name: smoke-run binaries
         run: |
-          ./target/debug/rabita-helper
+          ./target/debug/rabita-helper --help
+          ./target/debug/rabitactl --help
           ./target/debug/rabita-agent
           ./target/debug/rabita-app
+      - name: D-Bus smoke test (private session bus)
+        run: |
+          sudo apt-get install -y -q dbus
+          scripts/dbus-smoke.sh target/debug
 
   # Confirms the workspace still builds on the oldest Rust we promise to support.
   msrv:
-    name: Minimum supported Rust (1.80)
+    name: Minimum supported Rust (1.89)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked

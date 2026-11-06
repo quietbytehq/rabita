@@ -3,58 +3,69 @@
 
 //! `rabita-helper` — the only part of Rabita that runs as root.
 //!
-//! It is intentionally small and auditable. It exposes
-//! `org.quietbyte.Rabita1` on the system D-Bus with the methods
-//! `DetectSystem`, `DiscoverDomain`, `Join`, `Leave`, `Status` and
-//! `ApplyOptions`. Every privileged method requires polkit authorisation
-//! for `org.quietbyte.rabita.manage`.
-//!
-//! Milestone 1 ships a stub that only reports its version. The D-Bus
-//! service and the real methods arrive in Milestone 2.
+//! It owns `org.quietbyte.Rabita1` on the system D-Bus and does the actual
+//! joining, leaving and status checks. Every privileged method is gated by
+//! polkit (`org.quietbyte.rabita.manage`).
 
-use rabita_backends::DistroFamily;
+use clap::Parser;
+use rabita_helper::polkit::Bus;
+use rabita_helper::service::RabitaService;
+use rabita_helper::{BUS_NAME, OBJECT_PATH, VERSION};
 
-/// Package version, injected by Cargo at build time.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn main() {
-    let family =
-        detect_family_from_file("/etc/os-release").map_or("unknown", DistroFamily::display_name);
-    println!("rabita-helper {VERSION} (stub) — detected family: {family}");
+#[derive(Parser, Debug)]
+#[command(name = "rabita-helper", version = VERSION, about = "Rabita root helper (D-Bus service)")]
+struct Args {
+    /// Listen on the session bus instead of the system bus (development
+    /// only). polkit is still consulted, by process id.
+    #[arg(long)]
+    session: bool,
 }
 
-/// Reads `/etc/os-release` and maps it to a [`DistroFamily`].
-fn detect_family_from_file(path: &str) -> Option<DistroFamily> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    detect_family(&contents)
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let bus = if args.session {
+        Bus::Session
+    } else {
+        Bus::System
+    };
+    if bus == Bus::System && !nix_is_root() {
+        eprintln!(
+            "rabita-helper: must run as root on the system bus (or use --session for development)"
+        );
+        std::process::exit(2);
+    }
+    let service = RabitaService::new(bus);
+    let builder = match bus {
+        Bus::System => zbus::connection::Builder::system()?,
+        Bus::Session => zbus::connection::Builder::session()?,
+    };
+    let _conn = builder
+        .name(BUS_NAME)?
+        .serve_at(OBJECT_PATH, service)?
+        .build()
+        .await?;
+    eprintln!(
+        "rabita-helper {VERSION}: serving {BUS_NAME} on the {} bus",
+        if args.session { "session" } else { "system" }
+    );
+
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    eprintln!("rabita-helper: shutting down");
+    Ok(())
 }
 
-/// Parses `os-release` text and maps it to a [`DistroFamily`].
-fn detect_family(os_release: &str) -> Option<DistroFamily> {
-    let mut id = "";
-    let mut id_like = "";
-    for line in os_release.lines() {
-        if let Some(v) = line.strip_prefix("ID=") {
-            id = v;
-        } else if let Some(v) = line.strip_prefix("ID_LIKE=") {
-            id_like = v;
-        }
-    }
-    DistroFamily::from_os_release(id, id_like)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_ubuntu_os_release() {
-        let text = "NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n";
-        assert_eq!(detect_family(text), Some(DistroFamily::Debian));
-    }
-
-    #[test]
-    fn unknown_distro_is_none() {
-        assert_eq!(detect_family("ID=nixos\n"), None);
-    }
+fn nix_is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
+        })
+        .unwrap_or(false)
 }
