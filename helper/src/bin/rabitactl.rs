@@ -236,7 +236,10 @@ fn run_direct(cli: &Cli) -> Result<(), String> {
         Command::Version => println!("rabita-helper library {VERSION} (direct)"),
         Command::Detect => println!("{}", pretty(&system::detect(&runner, &paths))),
         Command::Discover { domain } => {
-            println!("{}", pretty(&discover::discover(domain, &paths, true)));
+            println!(
+                "{}",
+                pretty(&discover::discover(domain, &runner, &paths, true))
+            );
         }
         Command::Status => println!("{}", pretty(&status::report(&runner, &paths, true))),
         Command::Join { .. } => {

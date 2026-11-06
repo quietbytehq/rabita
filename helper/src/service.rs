@@ -165,10 +165,11 @@ impl RabitaService {
     /// No authorisation needed.
     async fn discover_domain(&self, domain: String) -> fdo::Result<String> {
         let inner = Arc::clone(&self.inner);
-        let result =
-            tokio::task::spawn_blocking(move || discover::discover(&domain, &inner.paths, true))
-                .await
-                .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let result = tokio::task::spawn_blocking(move || {
+            discover::discover(&domain, inner.runner.as_ref(), &inner.paths, true)
+        })
+        .await
+        .map_err(|e| fdo::Error::Failed(e.to_string()))?;
         Self::to_json(&result)
     }
 

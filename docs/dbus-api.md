@@ -15,7 +15,7 @@ consume them directly and the interface stays stable while the structures grow.
 | Method | In | Out | polkit | Notes |
 |---|---|---|---|---|
 | `DetectSystem()` | – | `s` JSON `SystemInfo` | no | Distro, family, supported?, display manager, host name, joined domain |
-| `DiscoverDomain(domain s)` | domain name | `s` JSON `DiscoveryResult` | no | DNS SRV lookup of `_ldap._tcp.dc._msdcs.<domain>`, TCP reachability, clock offset via SNTP |
+| `DiscoverDomain(domain s)` | domain name | `s` JSON `DiscoveryResult` | no | DNS SRV lookup of `_ldap._tcp.dc._msdcs.<domain>` (plus the client site's `_sites` record when `adcli` can tell the site), parallel TCP/SNTP probes, ranking and warnings |
 | `Status()` | – | `s` JSON `StatusReport` | no | Membership, sssd config/service, keytab, Kerberos ticket, DC reachability, clock, home dirs, user lookup |
 | `Join(request s, password s)` | JSON `JoinRequest`, admin password | `u` job id | **yes** | Returns at once; progress via signals |
 | `Leave(request s, password s)` | JSON `LeaveRequest`, password (empty unless removing the computer account) | `u` job id | **yes** | Restores every backed-up file |
@@ -51,6 +51,24 @@ missed.
 ## Join steps (ids used in `Progress`)
 
 `detect`, `packages`, `time`, `join`, `sssd`, `access`, `home`, `display`, `verify`.
+
+## Discovery result (`DiscoveryResult`)
+
+Controllers are listed **best first**: DCs in the client's own AD site, then
+DCs whose clock agrees with the majority of DCs, then smallest clock offset,
+then SRV priority/weight; unreachable DCs last. Fields beyond the obvious:
+
+| Field | Meaning |
+|---|---|
+| `client_site` | The computer's AD site, when `adcli info` could report it (needs `adcli` installed; always true during a join, not on a fresh machine) |
+| `recommended` | Host of the healthiest DC; the join uses it for time sync. `null` when nothing is reachable |
+| `majority_clock_offset_secs` | How far this computer's clock is from the time most DCs agree on. A DC that disagrees with this majority is never used to set the time |
+| `warnings` | Plain-language summary: unreachable DCs ("possibly stale DNS records") and DCs more than 60 s off |
+| per DC `in_client_site`, `recommended`, `warning` | Same, per controller |
+
+`Status` reports the same in two checks: `dc` (is the configured or best DC
+reachable) and `dc-health` (warnings, with `warning: true` when any).
+`HealthCheck.warning` marks a check that passed but deserves attention.
 
 ## Options (`JoinOptions`, also the body of `ApplyOptions`)
 

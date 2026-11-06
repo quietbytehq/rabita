@@ -90,8 +90,16 @@ rabitactl detect
 rabitactl discover lab.quietbyte.test
 ```
 
-- [ ] `found: true`, at least one controller with `reachable: true` and a
-      `clock_offset_secs` close to 0 (anything under 120 is fine).
+- [ ] `found: true`; controllers are listed best first and exactly one has
+      `recommended: true`. `recommended` names it.
+- [ ] `majority_clock_offset_secs` is close to 0 (anything under 120 is fine).
+- [ ] On a domain with stale DNS records or wrong clocks: unreachable DCs
+      carry a `warning` mentioning *stale DNS record*, DCs more than 60 s off
+      carry a clock warning, and `warnings` summarises both. A DC that
+      disagrees with the majority is never the recommended one.
+- [ ] `client_site` is `null` before `adcli` is installed and filled in after
+      a join (re-run `rabitactl discover` after step 4); DCs in that site then
+      show `in_client_site: true` and sort first.
 - [ ] `rabitactl discover LAB` says to enter the full domain name.
 - [ ] `rabitactl discover nowhere.invalid` says no domain controllers found.
 
@@ -122,6 +130,9 @@ Run the same command with the correct password.
       *This computer is now connected to lab.quietbyte.test.*
 - [ ] The "Choose who can sign in" step says *All domain users*.
 - [ ] Terminal 1 shows no errors.
+- [ ] The "Find the domain and check the clock" step names the recommended
+      DC and, if the domain has stale records or bad clocks, says how many
+      warnings there are; the details log lists them.
 - [ ] Verify step reports *Kerberos ticket OK; user 'amna' found*.
 
 Checks from the shell:
@@ -141,7 +152,9 @@ rabitactl status
 - [ ] `realm list` shows `configured: kerberos-member`.
 - [ ] `id amna` prints a uid and groups (no `@lab.quietbyte.test` suffix needed).
 - [ ] Every check in `rabitactl status` has `ok: true`; `domain_controller`
-      is filled in; `joined_at` is now.
+      is filled in; `joined_at` is now. The "Domain controller health" check
+      shows `warning: true` and lists stale records or bad clocks if the
+      domain has any.
 - [ ] `sudo cat /etc/sssd/sssd.conf` contains
       `use_fully_qualified_names = False`, `fallback_homedir = /home/%u`,
       `cache_credentials = True`, `default_domain_suffix = lab.quietbyte.test`.
