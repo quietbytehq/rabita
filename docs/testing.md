@@ -133,6 +133,9 @@ Run the same command with the correct password.
 - [ ] The "Find the domain and check the clock" step names the recommended
       DC and, if the domain has stale records or bad clocks, says how many
       warnings there are; the details log lists them.
+- [ ] The "Join the domain" step says *Joined lab.quietbyte.test using
+      domain controller X*, where X is the `recommended` DC from
+      `rabitactl discover`, not whichever DC realm would have picked.
 - [ ] Verify step reports *Kerberos ticket OK; user 'amna' found*.
 
 Checks from the shell:
@@ -155,12 +158,86 @@ rabitactl status
       is filled in; `joined_at` is now. The "Domain controller health" check
       shows `warning: true` and lists stale records or bad clocks if the
       domain has any.
+- [ ] The "Setup" check in `rabitactl status` says *Finished*.
 - [ ] `sudo cat /etc/sssd/sssd.conf` contains
       `use_fully_qualified_names = False`, `fallback_homedir = /home/%u`,
-      `cache_credentials = True`, `default_domain_suffix = lab.quietbyte.test`.
+      `cache_credentials = True` and `ad_server = <recommended DC>, _srv_`.
+      It does **not** contain `default_domain_suffix` or `config_file_version`.
+- [ ] `sudo sssctl config-check` prints *Issues identified by validators: 0*
+      and `systemctl is-active sssd` prints `active` (tested on SSSD 2.12,
+      which refuses to start with the old settings).
 - [ ] `sudo ls /var/lib/rabita/backups/*/` lists the backed-up files
       (`etc__krb5.conf`, `etc__pam.d__common-session`, …).
 - [ ] On the DC: the computer object exists in the Linux PCs OU.
+
+### 4b. Joined but not finished, then Finish setup
+
+This forces a failure after the computer account exists, to check that
+Rabita says so and can finish later. Start from a fresh snapshot.
+
+Install the packages first, so the forced failure does not hit the package
+step (installing `libpam-sss` runs `pam-auth-update` itself):
+
+```bash
+sudo apt-get install -y realmd sssd sssd-tools adcli krb5-user libnss-sss libpam-sss samba-common-bin cifs-utils keyutils cups
+```
+
+```bash
+sudo chmod -x /usr/sbin/pam-auth-update
+```
+
+```bash
+rabitactl join lab.quietbyte.test --user joiner --verify-user amna
+```
+
+- [ ] The run ends with `JOINED BUT NOT FINISHED` and a summary that starts
+      *This computer is joined to lab.quietbyte.test but not finished*, says
+      what failed, and lists the remaining steps: *Create home folders on
+      first login, Show a username box on the login screen, Check that it
+      works*.
+- [ ] `rabitactl status`: the "Setup" check fails with *Joined but not
+      finished. Still to do: …*.
+- [ ] Running the join again refuses with *… already joined to
+      lab.quietbyte.test but not finished. Run Finish setup …*.
+
+Put the tool back and finish:
+
+```bash
+sudo chmod +x /usr/sbin/pam-auth-update
+```
+
+```bash
+rabitactl finish
+```
+
+- [ ] `SUCCESS` and *Setup finished. This computer is fully connected to
+      lab.quietbyte.test.* All five steps (sign-in, who can sign in, home
+      folders, login screen, check) ran.
+- [ ] `rabitactl status`: "Setup" says *Finished*.
+- [ ] Logging in as `amna` creates `/home/amna`.
+- [ ] `rabitactl finish` uses the choices made at join: if you joined with
+      `--allow-group`, the group list is unchanged afterwards.
+
+### 4c. Repair a computer joined by an earlier build
+
+On the Ubuntu 26.04 VM that was joined before this fix (SSSD not starting,
+no home folder), without restoring the snapshot:
+
+```bash
+rabitactl status
+```
+
+- [ ] The "Sign-in configuration" check fails with *sssd.conf sets
+      default_domain_suffix, which stops SSSD 2.10 and newer from starting*,
+      and "Setup" warns *Joined by an earlier version of Rabita*.
+
+```bash
+rabitactl finish
+```
+
+- [ ] `SUCCESS`; `default_domain_suffix` and `config_file_version` are gone
+      from `/etc/sssd/sssd.conf`; `systemctl is-active sssd` prints `active`;
+      the next domain login gets a home folder.
 
 ### 5. Log in as a domain user
 
@@ -275,6 +352,11 @@ Then restore the VM snapshot.
 - `busctl monitor org.quietbyte.Rabita1` shows the raw signals.
 
 ### Known limits in this milestone
+
+- Rabita joins by giving realm the recommended DC's host name, so realmd
+  enrols through that server. If realm cannot use it by name, Rabita logs a
+  warning and retries with the domain name; the "Join the domain" step then
+  says which DC realm used.
 
 - SDDM (KDE) gets no login-screen change yet; most SDDM themes already offer
   "Other".

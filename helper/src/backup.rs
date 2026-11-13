@@ -55,6 +55,12 @@ pub struct State {
     pub backups: Vec<BackupEntry>,
     /// Whether home-directory creation was already enabled before the join.
     pub mkhomedir_was_enabled: bool,
+    /// Whether every step after joining has completed. `Some(false)` means
+    /// "joined but not finished"; `None` means the state was written by an
+    /// older Rabita that did not track this.
+    pub setup_finished: Option<bool>,
+    /// Ids of the steps still to run when setup is not finished.
+    pub remaining_steps: Vec<String>,
 }
 
 /// Errors from the store.

@@ -251,7 +251,7 @@ pub struct StepOutcome {
 }
 
 /// Final result of a `Join`, `Leave` or `ApplyOptions` job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobResult {
     /// Whether every required step succeeded.
     pub ok: bool,
@@ -259,6 +259,13 @@ pub struct JobResult {
     pub summary: String,
     /// Every step, in order.
     pub steps: Vec<StepOutcome>,
+    /// The computer is in the domain, but a later step failed. Domain
+    /// sign-in may not fully work until `ApplyOptions` finishes setup.
+    #[serde(default)]
+    pub joined_not_finished: bool,
+    /// Ids of the steps still to run when `joined_not_finished`.
+    #[serde(default)]
+    pub remaining_steps: Vec<String>,
 }
 
 /// One health check in `Status`.
@@ -278,7 +285,7 @@ pub struct HealthCheck {
 }
 
 /// Result of `Status`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
     /// Whether this computer is a member of a domain.
     pub joined: bool,
@@ -292,6 +299,18 @@ pub struct StatusReport {
     pub domain_controller: Option<String>,
     /// When Rabita joined (RFC 3339), when known.
     pub joined_at: Option<String>,
+    /// Whether setup after joining is complete. `Some(false)` means joined
+    /// but not finished; `None` when unknown (not joined by this Rabita, or
+    /// joined by an older version).
+    #[serde(default)]
+    pub setup_finished: Option<bool>,
+    /// Ids of the steps still to run when setup is not finished.
+    #[serde(default)]
+    pub remaining_steps: Vec<String>,
+    /// The options saved when Rabita joined, so "Finish setup" can pass
+    /// them back to `ApplyOptions` unchanged.
+    #[serde(default)]
+    pub options: Option<JoinOptions>,
     /// Health checks.
     pub checks: Vec<HealthCheck>,
 }
@@ -359,6 +378,8 @@ mod tests {
     #[test]
     fn job_result_round_trips() {
         let result = JobResult {
+            joined_not_finished: false,
+            remaining_steps: Vec::new(),
             ok: true,
             summary: "Joined".into(),
             steps: vec![StepOutcome {

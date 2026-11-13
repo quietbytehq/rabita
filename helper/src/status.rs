@@ -121,6 +121,50 @@ pub fn format_rfc3339(secs: u64) -> String {
     )
 }
 
+/// The first real server in an `ad_server` list (`dc1, _srv_` -> `dc1`).
+#[must_use]
+pub fn first_ad_server(value: &str) -> Option<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .find(|s| !s.is_empty() && *s != "_srv_")
+        .map(str::to_owned)
+}
+
+/// Whether the steps after joining all completed.
+#[must_use]
+pub fn setup_check(state: &crate::backup::State) -> HealthCheck {
+    match state.setup_finished {
+        Some(true) => check("setup", "Setup", Some(true), "Finished"),
+        Some(false) => {
+            let labels: Vec<&str> = state
+                .remaining_steps
+                .iter()
+                .map(|id| crate::join::step_label(id))
+                .collect();
+            check(
+                "setup",
+                "Setup",
+                Some(false),
+                format!(
+                    "Joined but not finished. Still to do: {}. Run Finish setup (rabitactl finish).",
+                    labels.join(", ")
+                ),
+            )
+        }
+        None => {
+            let mut hc = check(
+                "setup",
+                "Setup",
+                Some(true),
+                "Joined by an earlier version of Rabita. Run Finish setup (rabitactl finish) once to bring it up to date.",
+            );
+            hc.warning = true;
+            hc
+        }
+    }
+}
+
 /// Reads who may sign in from `sssd.conf`, as `realm permit` wrote it.
 #[must_use]
 pub fn describe_login_access(doc: &IniDocument, section: Option<&str>) -> String {
@@ -201,14 +245,13 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
 
     if !joined {
         return StatusReport {
-            joined: false,
-            domain: None,
-            realm: None,
-            computer_name: None,
-            domain_controller: None,
-            joined_at: None,
             checks,
+            ..StatusReport::default()
         };
+    }
+
+    if state.joined {
+        checks.push(setup_check(&state));
     }
 
     // sssd config and the DC it points at.
@@ -223,20 +266,34 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
                 .as_ref()
                 .and_then(|s| doc.get(s, "use_fully_qualified_names"))
                 .unwrap_or_else(|| "True".to_owned());
-            if let Some(server) = section.as_ref().and_then(|s| doc.get(s, "ad_server")) {
+            if let Some(server) = section
+                .as_ref()
+                .and_then(|s| doc.get(s, "ad_server"))
+                .and_then(|v| first_ad_server(&v))
+            {
                 dc = Some(server);
             }
+            let needs_repair = crate::join::sssd_conf_needs_repair(text);
             login_access_detail = Some(describe_login_access(&doc, section.as_deref()));
-            checks.push(check(
-                "sssd-config",
-                "Sign-in configuration",
-                Some(true),
-                if fq.eq_ignore_ascii_case("false") {
-                    "Plain usernames enabled"
-                } else {
-                    "Present (users must sign in as user@domain)"
-                },
-            ));
+            checks.push(if needs_repair {
+                check(
+                    "sssd-config",
+                    "Sign-in configuration",
+                    Some(false),
+                    "sssd.conf sets default_domain_suffix, which stops SSSD 2.10 and newer from starting. Run Finish setup (rabitactl finish) to repair it.",
+                )
+            } else {
+                check(
+                    "sssd-config",
+                    "Sign-in configuration",
+                    Some(true),
+                    if fq.eq_ignore_ascii_case("false") {
+                        "Plain usernames enabled"
+                    } else {
+                        "Present (users must sign in as user@domain)"
+                    },
+                )
+            });
         }
         None => checks.push(check(
             "sssd-config",
@@ -390,6 +447,9 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
         computer_name: state.computer_name.clone(),
         domain_controller: dc,
         joined_at: state.joined_at.map(format_rfc3339),
+        setup_finished: state.setup_finished.filter(|_| state.joined),
+        remaining_steps: state.remaining_steps.clone(),
+        options: state.joined.then(|| state.options.clone()),
         checks,
     }
 }
@@ -429,7 +489,7 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, content).unwrap();
         };
-        write("/etc/sssd/sssd.conf", "[sssd]\n[domain/lab.test]\nuse_fully_qualified_names = False\nad_server = dc1.lab.test\n");
+        write("/etc/sssd/sssd.conf", "[sssd]\n[domain/lab.test]\nuse_fully_qualified_names = False\nad_server = dc1.lab.test, _srv_\n");
         write("/etc/krb5.keytab", "x");
         write(
             "/etc/pam.d/common-session",
@@ -443,6 +503,7 @@ mod tests {
                 joined_at: Some(1_700_000_000),
                 computer_name: Some("PC1".into()),
                 verify_user: Some("amna".into()),
+                setup_finished: Some(true),
                 ..State::default()
             })
             .unwrap();
@@ -473,6 +534,7 @@ mod tests {
             ids,
             [
                 "membership",
+                "setup",
                 "sssd-config",
                 "login-access",
                 "sssd-service",
@@ -483,7 +545,68 @@ mod tests {
                 "user-lookup"
             ]
         );
-        assert_eq!(rep.checks[2].detail, "All domain users");
+        assert_eq!(rep.checks[3].detail, "All domain users");
+        assert_eq!(rep.setup_finished, Some(true));
+        assert_eq!(rep.options, Some(crate::types::JoinOptions::default()));
+    }
+
+    #[test]
+    fn reports_joined_but_not_finished_and_the_bad_sssd_setting() {
+        let mut state = State {
+            joined: true,
+            setup_finished: Some(false),
+            remaining_steps: vec!["home".into(), "verify".into()],
+            ..State::default()
+        };
+        let hc = setup_check(&state);
+        assert_eq!(hc.ok, Some(false));
+        assert_eq!(
+            hc.detail,
+            "Joined but not finished. Still to do: Create home folders on first login, Check that it works. Run Finish setup (rabitactl finish)."
+        );
+        state.setup_finished = None;
+        let hc = setup_check(&state);
+        assert_eq!(hc.ok, Some(true));
+        assert!(hc.warning && hc.detail.contains("earlier version"));
+        state.setup_finished = Some(true);
+        assert_eq!(setup_check(&state).detail, "Finished");
+
+        assert_eq!(
+            first_ad_server("dc1.lab.test, _srv_").as_deref(),
+            Some("dc1.lab.test")
+        );
+        assert_eq!(
+            first_ad_server("_srv_, dc2.lab.test").as_deref(),
+            Some("dc2.lab.test")
+        );
+        assert_eq!(first_ad_server("_srv_"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let conf = paths.sssd_conf();
+        fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        fs::write(&conf, "[sssd]\ndefault_domain_suffix = lab.test\n[domain/lab.test]\nuse_fully_qualified_names = False\n").unwrap();
+        Store::new(paths.clone())
+            .save(&State {
+                domain: Some("lab.test".into()),
+                joined: true,
+                setup_finished: Some(false),
+                remaining_steps: vec!["sssd".into()],
+                ..State::default()
+            })
+            .unwrap();
+        let fake = FakeRunner::new();
+        fake.ok(
+            "realm list",
+            "lab.test\n  domain-name: lab.test\n  configured: kerberos-member\n",
+        );
+        let rep = report(&fake, &paths, false);
+        assert_eq!(rep.setup_finished, Some(false));
+        assert_eq!(rep.remaining_steps, ["sssd"]);
+        let get = |id: &str| rep.checks.iter().find(|c| c.id == id).unwrap().clone();
+        assert_eq!(get("setup").ok, Some(false));
+        assert_eq!(get("sssd-config").ok, Some(false));
+        assert!(get("sssd-config").detail.contains("stops SSSD 2.10"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use rabita_helper::join::JobContext;
 use rabita_helper::paths::Paths;
 use rabita_helper::progress::{FnSink, ProgressEvent};
 use rabita_helper::types::{
-    JobResult, JoinOptions, JoinRequest, LeaveRequest, LoginAccess, StepState,
+    JobResult, JoinOptions, JoinRequest, LeaveRequest, LoginAccess, StatusReport, StepState,
 };
 use rabita_helper::{discover, join, leave, status, system, VERSION};
 use zeroize::Zeroizing;
@@ -100,7 +100,9 @@ enum Command {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Re-apply options on a joined computer.
+    /// Re-apply options on a joined computer. Options you leave out take
+    /// their defaults: without --allow-group, everyone may sign in. To finish
+    /// an interrupted setup with the choices made when joining, use `finish`.
     ApplyOptions {
         /// Username box on the login screen.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -113,6 +115,9 @@ enum Command {
         #[arg(long = "allow-group", value_name = "GROUP")]
         allow_groups: Vec<String>,
     },
+    /// Finish a setup that stopped after joining ("joined but not
+    /// finished"), using the options chosen when joining.
+    Finish,
     /// Print every signal the helper emits until Ctrl-C (D-Bus mode only).
     Watch,
 }
@@ -171,7 +176,16 @@ fn print_result(result: &JobResult, json: bool) {
         );
     } else {
         println!();
-        println!("{}", if result.ok { "SUCCESS" } else { "FAILED" });
+        println!(
+            "{}",
+            if result.ok {
+                "SUCCESS"
+            } else if result.joined_not_finished {
+                "JOINED BUT NOT FINISHED"
+            } else {
+                "FAILED"
+            }
+        );
         println!("{}", result.summary);
     }
 }
@@ -230,7 +244,7 @@ fn run_direct(cli: &Cli) -> Result<(), String> {
         runner: &runner,
         paths: &paths,
         sink: &sink,
-        network: true,
+        network: Some(&rabita_helper::discover::LiveNetwork),
     };
     match &cli.command {
         Command::Version => println!("rabita-helper library {VERSION} (direct)"),
@@ -288,6 +302,25 @@ fn run_direct(cli: &Cli) -> Result<(), String> {
             };
             let result = rabita_helper::service::apply_options_job(&ctx, &opts);
             print_result(&result, cli.json);
+            if !result.ok {
+                std::process::exit(1);
+            }
+        }
+        Command::Finish => {
+            let state = rabita_helper::backup::Store::new(paths.clone())
+                .load()
+                .map_err(|e| e.to_string())?;
+            if !state.joined {
+                return Err(
+                    "This computer is not connected to a domain, so there is nothing to finish."
+                        .into(),
+                );
+            }
+            let result = rabita_helper::service::apply_options_job(&ctx, &state.options);
+            print_result(&result, cli.json);
+            if !result.ok {
+                std::process::exit(1);
+            }
         }
         Command::Watch => return Err("watch only works over D-Bus".into()),
     }
@@ -361,8 +394,36 @@ async fn wait_for_job(
     JobResult {
         ok: false,
         summary: "Lost the connection to the helper before the job finished.".into(),
-        steps: Vec::new(),
+        ..JobResult::default()
     }
+}
+
+/// Finishes an interrupted setup over D-Bus, with the options saved when
+/// joining (read from `Status`), so finishing never changes a choice.
+async fn dbus_finish(
+    proxy: &RabitaProxy<'_>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report: StatusReport = serde_json::from_str(&proxy.status().await?)?;
+    let Some(options) = report.options else {
+        return Err(
+            "Rabita did not join this computer, so there are no saved choices to finish with."
+                .into(),
+        );
+    };
+    if report.setup_finished == Some(true) {
+        println!("Setup is already finished. Re-applying the saved options.");
+    }
+    let stream = signal_stream(proxy).await?;
+    let job = proxy
+        .apply_options(&serde_json::to_string(&options)?)
+        .await?;
+    println!("Job {job} started.");
+    let result = wait_for_job(proxy, stream, job, json).await;
+    if !result.ok {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn run_dbus(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -437,6 +498,7 @@ async fn run_dbus(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Command::Finish => dbus_finish(&proxy, cli.json).await?,
         Command::Watch => {
             println!("Watching signals from the helper (Ctrl-C to stop)…");
             let stream = signal_stream(&proxy).await?;

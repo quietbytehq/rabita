@@ -113,6 +113,41 @@ impl IniDocument {
         self.lines.insert(insert_at, new_line);
     }
 
+    /// Removes a key from one section. Returns whether it was there.
+    pub fn remove(&mut self, section: &str, key: &str) -> bool {
+        let Some((start, end)) = self.section_range(section) else {
+            return false;
+        };
+        let before = self.lines.len();
+        let mut i = start;
+        let mut end = end;
+        while i < end {
+            if key_of(&self.lines[i]).is_some_and(|k| k.eq_ignore_ascii_case(key)) {
+                self.lines.remove(i);
+                end -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        self.lines.len() != before
+    }
+
+    /// Removes a key from every section. Returns how many lines went.
+    pub fn remove_everywhere(&mut self, key: &str) -> usize {
+        let before = self.lines.len();
+        self.lines
+            .retain(|l| !key_of(l).is_some_and(|k| k.eq_ignore_ascii_case(key)));
+        before - self.lines.len()
+    }
+
+    /// Whether any section sets `key`.
+    #[must_use]
+    pub fn has_key_anywhere(&self, key: &str) -> bool {
+        self.lines
+            .iter()
+            .any(|l| key_of(l).is_some_and(|k| k.eq_ignore_ascii_case(key)))
+    }
+
     /// Sets the same key in every section whose name starts with `prefix`
     /// (e.g. `domain/`). Returns how many sections were touched.
     pub fn set_in_sections_with_prefix(&mut self, prefix: &str, key: &str, value: &str) -> usize {
@@ -189,16 +224,37 @@ access_provider = ad
     }
 
     #[test]
+    fn removes_keys_and_keeps_everything_else() {
+        let mut doc = IniDocument::parse(SSSD);
+        assert!(doc.remove("sssd", "config_file_version"));
+        assert!(!doc.remove("sssd", "config_file_version"), "already gone");
+        assert!(!doc.remove("nope", "x"));
+        let out = doc.render();
+        assert!(!out.contains("config_file_version"));
+        assert!(
+            out.contains("[sssd]\ndomains = lab.quietbyte.test\nservices = nss, pam\n\n[domain/")
+        );
+
+        let mut doc = IniDocument::parse("[sssd]\nk = 1\n[domain/a]\nk = 2\n# k = 3\n");
+        assert!(doc.has_key_anywhere("K"));
+        assert_eq!(doc.remove_everywhere("k"), 2);
+        assert!(!doc.has_key_anywhere("k"));
+        assert_eq!(
+            doc.render(),
+            "[sssd]\n[domain/a]\n# k = 3\n",
+            "comments stay"
+        );
+    }
+
+    #[test]
     fn appends_new_key_to_section_before_trailing_blank() {
         let mut doc = IniDocument::parse(SSSD);
-        doc.set("sssd", "default_domain_suffix", "lab.quietbyte.test");
+        doc.set("sssd", "debug_level", "3");
         let out = doc.render();
-        let idx_new = out.find("default_domain_suffix").unwrap();
+        let idx_new = out.find("debug_level").unwrap();
         let idx_next_section = out.find("[domain/").unwrap();
         assert!(idx_new < idx_next_section);
-        assert!(out.contains(
-            "services = nss, pam\ndefault_domain_suffix = lab.quietbyte.test\n\n[domain/"
-        ));
+        assert!(out.contains("services = nss, pam\ndebug_level = 3\n\n[domain/"));
     }
 
     #[test]

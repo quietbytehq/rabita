@@ -7,28 +7,33 @@
 //! 1. detect   — is this computer supported?
 //! 2. packages — install realmd, sssd, adcli and friends
 //! 3. time     — find the domain controllers and check the clock
-//! 4. join     — `realm join` with the admin password on stdin
-//! 5. sssd     — plain usernames, offline login, `/home/<user>`
+//! 4. join     — `realm join` through the recommended domain controller,
+//!    with the admin password on stdin
+//! 5. sssd     — plain usernames, offline login, `/home/<user>`, preferred
+//!    DC; checked with `sssctl config-check` before restarting
 //! 6. access   — who may sign in (everyone, or only listed groups)
 //! 7. home     — create home folders on first login
 //! 8. display  — username box on the login screen
 //! 9. verify   — Kerberos ticket from the machine keytab, user lookup
+//!
+//! Steps 5-9 run after the computer account exists. If one fails, the
+//! computer is "joined but not finished": the state file lists the steps
+//! still to run and `ApplyOptions` (Finish setup) completes them.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rabita_backends::{Action, Backend, SystemFacts};
+use rabita_backends::{Action, Backend, DisplayManager, SystemFacts};
 use zeroize::Zeroizing;
 
 use crate::backup::{State, Store};
-use crate::cmd::{CommandSpec, Runner};
-use crate::discover;
+use crate::cmd::{CommandOutput, CommandSpec, Runner};
+use crate::discover::{self, Network};
 use crate::ini::IniDocument;
 use crate::paths::Paths;
 use crate::progress::{ProgressSink, Reporter};
-use crate::sntp;
 use crate::system;
-use crate::types::{JobResult, JoinRequest, LoginAccess, StepState};
+use crate::types::{JobResult, JoinOptions, JoinRequest, LoginAccess, StepOutcome, StepState};
 
 /// Everything a job needs from its surroundings.
 pub struct JobContext<'a> {
@@ -38,8 +43,9 @@ pub struct JobContext<'a> {
     pub paths: &'a Paths,
     /// Receives progress.
     pub sink: &'a dyn ProgressSink,
-    /// Whether to probe the network (DNS, SNTP). Tests turn this off.
-    pub network: bool,
+    /// The network to probe (DNS, TCP, SNTP). `None` skips network checks;
+    /// tests pass a fake that replays a real domain's layout.
+    pub network: Option<&'a dyn Network>,
 }
 
 /// Maximum clock difference (seconds) we accept without fixing time sync.
@@ -189,11 +195,23 @@ pub fn explain_realm_join_failure(output: &str) -> String {
 }
 
 /// Edits `sssd.conf` the way the wizard promises: plain usernames, offline
-/// login, `/home/<user>`.
+/// login, `/home/<user>`, and the healthiest domain controller first.
+///
+/// `default_domain_suffix` is removed wherever it appears: SSSD 2.10 and
+/// newer refuse to start when it is combined with
+/// `use_fully_qualified_names = False`, and plain usernames work without it
+/// because there is only one domain. `config_file_version` is removed too;
+/// SSSD 2 no longer uses it.
 #[must_use]
-pub fn configure_sssd_text(text: &str, domain: &str, offline_login: bool) -> String {
+pub fn configure_sssd_text(
+    text: &str,
+    domain: &str,
+    offline_login: bool,
+    preferred_dc: Option<&str>,
+) -> String {
     let mut doc = IniDocument::parse(text);
-    doc.set("sssd", "default_domain_suffix", domain);
+    doc.remove_everywhere("default_domain_suffix");
+    doc.remove("sssd", "config_file_version");
     let changed = doc.set_in_sections_with_prefix("domain/", "use_fully_qualified_names", "False");
     if changed == 0 {
         // No domain section yet (should not happen after realm join); create one.
@@ -212,7 +230,71 @@ pub fn configure_sssd_text(text: &str, domain: &str, offline_login: bool) -> Str
     // Let AD users log in even when no GPO grants "Allow log on locally"
     // to Linux machines; most schools never set one for Linux.
     doc.set_in_sections_with_prefix("domain/", "ad_gpo_access_control", "permissive");
+    if let Some(dc) = preferred_dc.map(str::trim).filter(|d| !d.is_empty()) {
+        // Talk to the healthiest DC first; `_srv_` falls back to DNS
+        // discovery if it is unavailable.
+        doc.set_in_sections_with_prefix("domain/", "ad_server", &format!("{dc}, _srv_"));
+    }
     doc.render()
+}
+
+/// Whether `sssd.conf` has a setting that stops SSSD 2.10+ from starting
+/// (written by Rabita before this was known).
+#[must_use]
+pub fn sssd_conf_needs_repair(text: &str) -> bool {
+    IniDocument::parse(text).has_key_anywhere("default_domain_suffix")
+}
+
+/// Problems reported by `sssctl config-check`, one line each. Empty when
+/// the configuration is valid.
+#[must_use]
+pub fn sssctl_problems(out: &CommandOutput) -> Vec<String> {
+    let text = out.combined();
+    let mut problems: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("[rule/") || l.to_ascii_lowercase().contains("check failed"))
+        .map(str::to_owned)
+        .collect();
+    let issue_count = text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("Issues identified by validators:")
+            .and_then(|n| n.trim().parse::<usize>().ok())
+    });
+    if problems.is_empty() && (!out.success() || issue_count.is_some_and(|n| n > 0)) {
+        let tail = last_lines(&text, 3);
+        problems.push(if tail.is_empty() {
+            "sssctl config-check failed without saying why".to_owned()
+        } else {
+            tail
+        });
+    }
+    problems
+}
+
+/// The domain controller adcli says it used. `realm join --verbose` passes
+/// adcli's ` * Using domain controller: <host>` line through.
+#[must_use]
+pub fn used_domain_controller(output: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        l.trim()
+            .trim_start_matches('*')
+            .trim()
+            .strip_prefix("Using domain controller:")
+            .map(|h| h.trim().to_owned())
+            .filter(|h| !h.is_empty())
+    })
+}
+
+/// Whether `realm join` failed while discovering the name it was given,
+/// before talking to the domain at all.
+fn is_discovery_failure(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("no such realm")
+        || lower.contains("couldn't find")
+        || lower.contains("couldn't discover")
+        || lower.contains("not discovered")
+        || lower.contains("cannot resolve")
 }
 
 /// Actions that set who may sign in, via `realm permit` / `realm deny`.
@@ -285,12 +367,18 @@ pub fn keytab_principal(klist_output: &str) -> Option<String> {
     fallback
 }
 
-struct Steps<'a> {
+/// Runs steps one at a time and reports each one's progress.
+pub(crate) struct Steps<'a> {
     reporter: Reporter<'a>,
 }
 
-impl Steps<'_> {
-    fn run<T>(
+impl<'a> Steps<'a> {
+    /// Wraps a reporter.
+    pub(crate) fn new(reporter: Reporter<'a>) -> Self {
+        Self { reporter }
+    }
+
+    pub(crate) fn run<T>(
         &self,
         id: &str,
         label: &str,
@@ -322,6 +410,352 @@ const JOIN_STEPS: [(&str, &str); 9] = [
     ("verify", "Check that it works"),
 ];
 
+/// Ids of the steps that run after the computer account exists, in order.
+/// If one of them fails, the computer is "joined but not finished" and
+/// `ApplyOptions` can run them again to finish setup.
+pub const POST_JOIN_STEPS: [&str; 5] = ["sssd", "access", "home", "display", "verify"];
+
+/// Plain-language label for a step id.
+#[must_use]
+pub fn step_label(id: &str) -> &'static str {
+    JOIN_STEPS
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map_or("Unknown step", |(_, l)| *l)
+}
+
+/// The summary for a computer that is in the domain but not fully set up.
+#[must_use]
+pub fn not_finished_summary(domain: &str, problem: &str, remaining: &[String]) -> String {
+    let labels: Vec<&str> = remaining.iter().map(|id| step_label(id)).collect();
+    format!(
+        "This computer is joined to {domain} but not finished. {}. Until setup is finished, domain sign-in may not work properly (for example, home folders may not be created). Fix the problem, then run Finish setup (rabitactl finish) to complete the remaining steps: {}.",
+        problem.trim().trim_end_matches('.'),
+        labels.join(", ")
+    )
+}
+
+/// Marks steps that never started after a failure, so the result says why.
+pub(crate) fn mark_not_run(steps: &mut [StepOutcome], joined_not_finished: bool) {
+    for s in steps {
+        if s.state == StepState::Pending {
+            s.state = StepState::Skipped;
+            if joined_not_finished {
+                "Not run yet. Finish setup will run it.".clone_into(&mut s.message);
+            } else {
+                "Not run because an earlier step failed.".clone_into(&mut s.message);
+            }
+        }
+    }
+}
+
+/// What the steps after joining need to know.
+pub struct PostJoin<'a> {
+    /// Domain name.
+    pub domain: &'a str,
+    /// Options to apply (login access already normalised).
+    pub options: &'a JoinOptions,
+    /// Domain user looked up by the verify step, if any.
+    pub verify_user: Option<&'a str>,
+    /// Healthiest domain controller, preferred in `sssd.conf`.
+    pub preferred_dc: Option<&'a str>,
+    /// Which of [`POST_JOIN_STEPS`] to run, in order.
+    pub steps: &'a [&'a str],
+    /// When an option is off, undo it (`ApplyOptions`) instead of skipping
+    /// it (`Join`, where there is nothing to undo).
+    pub undo_disabled: bool,
+    /// Record progress so a failure leaves the computer marked "joined but
+    /// not finished" with the steps still to run.
+    pub track_unfinished: bool,
+}
+
+type StepResult = Result<(StepState, String, ()), StepError>;
+
+/// Runs the post-join steps in `pj.steps` and stops at the first failure.
+///
+/// With `track_unfinished`, the state file records which steps are still to
+/// run after every step, so a failure (or a crash) leaves the computer marked
+/// "joined but not finished", and success marks setup finished.
+pub(crate) fn run_post_join(
+    ctx: &JobContext<'_>,
+    store: &Store,
+    state: &mut State,
+    backend: &dyn Backend,
+    display_manager: DisplayManager,
+    pj: &PostJoin<'_>,
+    steps: &Steps<'_>,
+) -> Result<(), StepError> {
+    let save = |state: &State| {
+        store
+            .save(state)
+            .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))
+    };
+    let remaining_from = |i: usize| -> Vec<String> {
+        pj.steps[i.min(pj.steps.len())..]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    };
+    let access_actions = login_access_actions(&pj.options.login_access)?;
+    if pj.track_unfinished {
+        state.setup_finished = Some(false);
+        state.remaining_steps = remaining_from(0);
+        save(state)?;
+    }
+    let facts = SystemFacts {
+        mkhomedir_already_enabled: state.mkhomedir_was_enabled,
+        ..system::gather_facts(ctx.paths)
+    };
+    for (i, id) in pj.steps.iter().enumerate() {
+        let outcome = steps.run(id, step_label(id), |r| match *id {
+            "sssd" => sssd_step(ctx, store, state, r, pj),
+            "access" => {
+                execute_actions(
+                    ctx,
+                    store,
+                    state,
+                    r,
+                    &access_actions,
+                    Duration::from_secs(120),
+                )?;
+                Ok((StepState::Done, pj.options.login_access.describe(), ()))
+            }
+            "home" => home_step(ctx, store, state, r, backend, &facts, pj),
+            "display" => display_step(ctx, store, state, r, backend, &facts, display_manager, pj),
+            "verify" => verify_step(ctx, r, pj),
+            other => Err(StepError(format!("Unknown step '{other}'."))),
+        });
+        if pj.track_unfinished {
+            state.remaining_steps = remaining_from(if outcome.is_ok() { i + 1 } else { i });
+            if outcome.is_err() {
+                // Best effort: the step's own error is the one to report.
+                let _ = save(state);
+            } else {
+                save(state)?;
+            }
+        }
+        outcome?;
+    }
+    if pj.track_unfinished {
+        state.setup_finished = Some(true);
+        state.remaining_steps.clear();
+    }
+    save(state)
+}
+
+fn sssd_step(
+    ctx: &JobContext<'_>,
+    store: &Store,
+    state: &mut State,
+    r: &Reporter<'_>,
+    pj: &PostJoin<'_>,
+) -> StepResult {
+    let text = std::fs::read_to_string(ctx.paths.sssd_conf()).unwrap_or_default();
+    let new_text = configure_sssd_text(&text, pj.domain, pj.options.offline_login, pj.preferred_dc);
+    store
+        .write_file(state, Path::new("/etc/sssd/sssd.conf"), &new_text, 0o600)
+        .map_err(|e| StepError(format!("Could not update sssd.conf: {e}")))?;
+    r.log("Updated /etc/sssd/sssd.conf: plain usernames, offline login, /home/<user>");
+    if let Some(dc) = pj.preferred_dc {
+        r.log(format!(
+            "Preferred domain controller: {dc} (others are used if it is unavailable)"
+        ));
+    }
+
+    // Check the file before restarting, so a bad setting is reported in
+    // plain words instead of as a service that will not start.
+    let check = ctx
+        .runner
+        .run(&CommandSpec::new("sssctl", &["config-check"]).timeout(Duration::from_secs(60)))
+        .map_err(|e| {
+            StepError(format!(
+                "Could not check the new sign-in settings ({e}). Install the sssd-tools package, then finish setup."
+            ))
+        })?;
+    r.log_command("sssctl config-check", &check);
+    let problems = sssctl_problems(&check);
+    if !problems.is_empty() {
+        let shown: Vec<&str> = problems.iter().take(3).map(String::as_str).collect();
+        return Err(StepError(format!(
+            "The new sign-in settings in /etc/sssd/sssd.conf have errors, so the sign-in service was not restarted: {}",
+            shown.join("; ")
+        )));
+    }
+
+    let actions = [
+        Action::run(
+            "Enable the sign-in service",
+            "systemctl",
+            &["enable", "sssd"],
+        ),
+        Action::run(
+            "Restart the sign-in service",
+            "systemctl",
+            &["restart", "sssd"],
+        ),
+    ];
+    if let Err(e) = execute_actions(ctx, store, state, r, &actions, Duration::from_secs(60)) {
+        if let Ok(journal) = ctx.runner.run(&CommandSpec::new(
+            "journalctl",
+            &["-u", "sssd", "-n", "20", "--no-pager"],
+        )) {
+            r.log_command("journalctl -u sssd -n 20 --no-pager", &journal);
+        }
+        return Err(StepError(format!(
+            "The sign-in service (SSSD) did not start, so domain sign-in will not work yet. {}. See 'journalctl -u sssd' for details",
+            e.0.trim_end_matches('.')
+        )));
+    }
+    Ok((
+        StepState::Done,
+        "Sign-in configured, checked and started.".to_owned(),
+        (),
+    ))
+}
+
+fn home_step(
+    ctx: &JobContext<'_>,
+    store: &Store,
+    state: &mut State,
+    r: &Reporter<'_>,
+    backend: &dyn Backend,
+    facts: &SystemFacts,
+    pj: &PostJoin<'_>,
+) -> StepResult {
+    let (actions, done, nothing_to_do) = if pj.options.create_home {
+        (
+            backend.enable_login_integration(facts),
+            "Home folders will be created on first login.",
+            "Already enabled on this computer.",
+        )
+    } else if pj.undo_disabled {
+        (
+            backend.disable_login_integration(facts),
+            "Home folders will no longer be created automatically.",
+            "No change needed.",
+        )
+    } else {
+        return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
+    };
+    if actions.is_empty() {
+        return Ok((StepState::Skipped, nothing_to_do.to_owned(), ()));
+    }
+    execute_actions(ctx, store, state, r, &actions, Duration::from_secs(60))?;
+    Ok((StepState::Done, done.to_owned(), ()))
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors home_step plus the login screen in use
+fn display_step(
+    ctx: &JobContext<'_>,
+    store: &Store,
+    state: &mut State,
+    r: &Reporter<'_>,
+    backend: &dyn Backend,
+    facts: &SystemFacts,
+    display_manager: DisplayManager,
+    pj: &PostJoin<'_>,
+) -> StepResult {
+    let (actions, done) = if pj.options.manual_login {
+        (backend.enable_manual_login(facts), "Login screen updated.")
+    } else if pj.undo_disabled {
+        (
+            backend.disable_manual_login(facts),
+            "Username box removed from the login screen.",
+        )
+    } else {
+        return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
+    };
+    if actions.is_empty() {
+        return Ok((
+            StepState::Skipped,
+            format!("No change needed for this login screen ({display_manager:?})."),
+            (),
+        ));
+    }
+    execute_actions(ctx, store, state, r, &actions, Duration::from_secs(60))?;
+    Ok((StepState::Done, done.to_owned(), ()))
+}
+
+fn verify_step(ctx: &JobContext<'_>, r: &Reporter<'_>, pj: &PostJoin<'_>) -> StepResult {
+    let mut notes = Vec::new();
+    let klist = ctx
+        .runner
+        .run(&CommandSpec::new("klist", &["-k", "/etc/krb5.keytab"]))
+        .map_err(|e| StepError(format!("Could not read the computer's Kerberos keys: {e}")))?;
+    r.log_command("klist -k /etc/krb5.keytab", &klist);
+    let principal = keytab_principal(&klist.stdout).ok_or(
+        "The computer's Kerberos key file has no entries. The join did not complete properly.",
+    )?;
+    let kinit = ctx
+        .runner
+        .run(&CommandSpec::new(
+            "kinit",
+            &[
+                "-k",
+                "-t",
+                "/etc/krb5.keytab",
+                "-c",
+                "MEMORY:rabita-verify",
+                &principal,
+            ],
+        ))
+        .map_err(|e| StepError(format!("Could not run kinit: {e}")))?;
+    r.log_command(
+        &format!("kinit -k -t /etc/krb5.keytab -c MEMORY:rabita-verify {principal}"),
+        &kinit,
+    );
+    if !kinit.success() {
+        return Err(StepError(format!(
+            "The computer could not get a Kerberos ticket: {}",
+            last_lines(&kinit.combined(), 2)
+        )));
+    }
+    notes.push("Kerberos ticket OK".to_owned());
+    if let Some(user) = pj.verify_user.map(str::trim).filter(|u| !u.is_empty()) {
+        let mut found = false;
+        for _ in 0..5 {
+            let getent = ctx
+                .runner
+                .run(&CommandSpec::new("getent", &["passwd", user]))
+                .map_err(|e| StepError(format!("Could not run getent: {e}")))?;
+            r.log_command(&format!("getent passwd {user}"), &getent);
+            if getent.success() && !getent.stdout.trim().is_empty() {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(if ctx.network.is_some() {
+                2
+            } else {
+                0
+            }));
+        }
+        if !found {
+            return Err(StepError(format!(
+                "The user '{user}' could not be looked up yet. Wait a minute and check Status; if it still fails, check the user name."
+            )));
+        }
+        notes.push(format!("user '{user}' found"));
+    }
+    Ok((StepState::Done, notes.join("; "), ()))
+}
+
+/// Records that `realm join` added this computer to the domain.
+fn mark_joined(state: &mut State, req: &JoinRequest, hostname: &str) {
+    state.joined = true;
+    state.joined_at = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    );
+    state.computer_name = Some(req.computer_name.clone().unwrap_or_else(|| {
+        hostname
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase()
+    }));
+}
+
 /// Runs the whole join and returns the result. The password is wiped when
 /// this function returns.
 #[must_use]
@@ -332,27 +766,31 @@ pub fn run_join(ctx: &JobContext<'_>, req: &JoinRequest, password: Zeroizing<Str
     for (id, label) in JOIN_STEPS {
         reporter.step(id, label, StepState::Pending, "");
     }
-    let steps = Steps {
-        reporter: Reporter::new(&tee),
-    };
-    let outcome = join_inner(ctx, req, password, &steps);
+    let steps = Steps::new(Reporter::new(&tee));
+    let mut joined_now = false;
+    let outcome = join_inner(ctx, req, password, &steps, &mut joined_now);
+    let state = Store::new(ctx.paths.clone()).load().unwrap_or_default();
+    let unfinished =
+        outcome.is_err() && joined_now && state.joined && state.setup_finished != Some(true);
     let mut steps_out = collector.outcomes();
     if outcome.is_err() {
-        for s in &mut steps_out {
-            if s.state == StepState::Pending {
-                s.state = StepState::Skipped;
-                "Not run because an earlier step failed.".clone_into(&mut s.message);
-            }
-        }
+        mark_not_run(&mut steps_out, unfinished);
     }
     let (domain, _) = discover::normalise_domain(&req.domain);
     JobResult {
         ok: outcome.is_ok(),
-        summary: match outcome {
+        summary: match &outcome {
             Ok(()) => format!("This computer is now connected to {domain}."),
-            Err(e) => e.0,
+            Err(e) if unfinished => not_finished_summary(&domain, &e.0, &state.remaining_steps),
+            Err(e) => e.0.clone(),
         },
         steps: steps_out,
+        joined_not_finished: unfinished,
+        remaining_steps: if unfinished {
+            state.remaining_steps
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -362,30 +800,29 @@ fn join_inner(
     req: &JoinRequest,
     password: Zeroizing<String>,
     steps: &Steps<'_>,
+    joined_now: &mut bool,
 ) -> Result<(), StepError> {
     let store = Store::new(ctx.paths.clone());
     let (domain, realm) = discover::normalise_domain(&req.domain);
     if !discover::looks_like_domain(&domain) {
         steps.run("detect", JOIN_STEPS[0].1, |_| {
-            Err(StepError::from(
+            Err::<(StepState, String, ()), _>(StepError::from(
                 "Enter the full domain name, for example school.example.org.",
             ))
         })?;
     }
     if req.admin_user.trim().is_empty() {
         steps.run("detect", JOIN_STEPS[0].1, |_| {
-            Err(StepError::from("Enter the administrator account name."))
+            Err::<(StepState, String, ()), _>(StepError::from(
+                "Enter the administrator account name.",
+            ))
         })?;
     }
-    let access_actions = match login_access_actions(&req.options.login_access) {
-        Ok(a) => a,
-        Err(e) => {
-            steps.run("detect", JOIN_STEPS[0].1, |_| {
-                Err::<(StepState, String, ()), _>(e)
-            })?;
-            unreachable!("step failure returns early")
-        }
-    };
+    if let Err(e) = login_access_actions(&req.options.login_access) {
+        steps.run("detect", JOIN_STEPS[0].1, |_| {
+            Err::<(StepState, String, ()), _>(e)
+        })?;
+    }
 
     // 1. detect
     let (info, backend) = steps.run("detect", JOIN_STEPS[0].1, |r| {
@@ -398,6 +835,13 @@ fn join_inner(
             return Err(StepError(
                 info.unsupported_reason.clone().unwrap_or_default(),
             ));
+        }
+        let prior = store.load().unwrap_or_default();
+        if prior.joined && prior.setup_finished == Some(false) {
+            return Err(StepError(format!(
+                "This computer is already joined to {} but not finished. Run Finish setup (rabitactl finish) to complete it, or Leave domain to start again.",
+                prior.domain.unwrap_or_default()
+            )));
         }
         if let Some(d) = &info.joined_domain {
             return Err(StepError(format!(
@@ -448,7 +892,7 @@ fn join_inner(
             &actions,
             Duration::from_secs(20 * 60),
         )?;
-        for tool in ["realm", "adcli", "sssd"] {
+        for tool in ["realm", "adcli", "sssd", "sssctl"] {
             if !ctx.runner.which(tool) {
                 return Err(StepError(format!(
                     "'{tool}' is still missing after installing packages."
@@ -464,10 +908,10 @@ fn join_inner(
 
     // 3. time (and discovery)
     let dc = steps.run("time", JOIN_STEPS[2].1, |r| {
-        if !ctx.network {
+        let Some(net) = ctx.network else {
             return Ok((StepState::Skipped, "Network checks disabled.".to_owned(), None));
-        }
-        let disc = discover::discover(&domain, ctx.runner, ctx.paths, true);
+        };
+        let disc = net.discover(&domain, ctx.runner, ctx.paths);
         if let Some(p) = &disc.problem {
             if disc.recommended.is_none() {
                 return Err(StepError(p.clone()));
@@ -527,7 +971,7 @@ fn join_inner(
         let mut last = offset;
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_secs(3));
-            if let Ok(o) = sntp::clock_offset(&dc.host, Duration::from_secs(3)) {
+            if let Some(o) = net.clock_offset(&dc.host) {
                 last = o;
                 if o.abs() <= CLOCK_OK_SECS {
                     break;
@@ -548,7 +992,7 @@ fn join_inner(
     })?;
     state.domain_controller = dc;
 
-    // 4. join
+    // 4. join, through the recommended domain controller when there is one
     steps.run("join", JOIN_STEPS[3].1, |r| {
         for p in [
             "/etc/sssd/sssd.conf",
@@ -564,7 +1008,7 @@ fn join_inner(
                 .ensure_backup(&mut state, Path::new(p))
                 .map_err(|e| StepError(format!("Could not back up {p}: {e}")))?;
         }
-        let mut args = vec![
+        let mut base = vec![
             "join".to_owned(),
             "--unattended".to_owned(),
             "--verbose".to_owned(),
@@ -577,7 +1021,7 @@ fn join_inner(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            args.push(format!("--computer-ou={ou}"));
+            base.push(format!("--computer-ou={ou}"));
         }
         if let Some(name) = req
             .computer_name
@@ -585,206 +1029,97 @@ fn join_inner(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            args.push(format!("--computer-name={name}"));
+            base.push(format!("--computer-name={name}"));
         }
-        args.push(domain.clone());
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut secret = Zeroizing::new(String::with_capacity(password.len() + 1));
-        secret.push_str(&password);
-        secret.push('\n');
-        let spec = CommandSpec::new("realm", &arg_refs)
-            .stdin(secret)
-            .timeout(Duration::from_secs(10 * 60));
-        let display = spec.display();
-        let out = ctx
-            .runner
-            .run(&spec)
-            .map_err(|e| StepError(format!("Could not run realm: {e}")))?;
-        r.log_command(&display, &out);
+        // Naming a domain controller instead of the domain makes realmd
+        // discover the domain through that server and pass it to adcli
+        // (`--domain-controller`), so the join cannot wander off to a DC
+        // with a bad clock.
+        let run_realm_join = |target: &str| -> Result<CommandOutput, StepError> {
+            let mut args: Vec<&str> = base.iter().map(String::as_str).collect();
+            args.push(target);
+            let mut secret = Zeroizing::new(String::with_capacity(password.len() + 1));
+            secret.push_str(&password);
+            secret.push('\n');
+            let spec = CommandSpec::new("realm", &args)
+                .stdin(secret)
+                .timeout(Duration::from_secs(10 * 60));
+            let out = ctx
+                .runner
+                .run(&spec)
+                .map_err(|e| StepError(format!("Could not run realm: {e}")))?;
+            r.log_command(&spec.display(), &out);
+            Ok(out)
+        };
+        let target = state.domain_controller.clone();
+        let mut out = run_realm_join(target.as_deref().unwrap_or(&domain))?;
+        if let Some(dc) = &target {
+            if !out.success() && is_discovery_failure(&out.combined()) {
+                r.log(format!(
+                    "Warning: realm could not reach the domain through {dc}; letting it choose a domain controller for {domain} instead."
+                ));
+                out = run_realm_join(&domain)?;
+            }
+        }
         if !out.success() {
-            return Err(StepError(explain_realm_join_failure(&out.combined())));
+            let problem = explain_realm_join_failure(&out.combined());
+            // realm can fail after adcli has already created the computer
+            // account and written the local configuration.
+            if system::joined_realm(ctx.runner).is_some() {
+                mark_joined(&mut state, req, &info.hostname);
+                state.setup_finished = Some(false);
+                state.remaining_steps = POST_JOIN_STEPS.iter().map(|s| (*s).to_owned()).collect();
+                *joined_now = true;
+                store
+                    .save(&state)
+                    .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
+                return Err(StepError(format!(
+                    "The computer was added to the domain, but realm then reported a problem: {}",
+                    problem.trim_end_matches('.')
+                )));
+            }
+            return Err(StepError(problem));
         }
-        state.joined = true;
-        state.joined_at = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-        );
-        state.computer_name = Some(req.computer_name.clone().unwrap_or_else(|| {
-            info.hostname
-                .split('.')
-                .next()
-                .unwrap_or("")
-                .to_ascii_uppercase()
-        }));
+        mark_joined(&mut state, req, &info.hostname);
+        *joined_now = true;
         store
             .save(&state)
             .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
-        Ok((StepState::Done, format!("Joined {domain}."), ()))
+        let message = match (used_domain_controller(&out.combined()), &target) {
+            (Some(used), Some(wanted)) if !used.eq_ignore_ascii_case(wanted) => {
+                r.log(format!(
+                    "Warning: realm used domain controller {used} instead of the recommended {wanted}."
+                ));
+                format!("Joined {domain} using domain controller {used} (not the recommended {wanted}; see details).")
+            }
+            (Some(used), _) => format!("Joined {domain} using domain controller {used}."),
+            (None, _) => format!("Joined {domain}."),
+        };
+        Ok((StepState::Done, message, ()))
     })?;
     drop(password);
 
-    // 5. sssd
-    steps.run("sssd", JOIN_STEPS[4].1, |r| {
-        let conf_path = ctx.paths.sssd_conf();
-        let text = std::fs::read_to_string(&conf_path).unwrap_or_default();
-        let new_text = configure_sssd_text(&text, &domain, req.options.offline_login);
-        store
-            .write_file(
-                &mut state,
-                Path::new("/etc/sssd/sssd.conf"),
-                &new_text,
-                0o600,
-            )
-            .map_err(|e| StepError(format!("Could not update sssd.conf: {e}")))?;
-        r.log("Updated /etc/sssd/sssd.conf: plain usernames, offline login, /home/<user>");
-        let actions = [
-            Action::run(
-                "Enable the sign-in service",
-                "systemctl",
-                &["enable", "sssd"],
-            ),
-            Action::run(
-                "Restart the sign-in service",
-                "systemctl",
-                &["restart", "sssd"],
-            ),
-        ];
-        execute_actions(
-            ctx,
-            &store,
-            &mut state,
-            r,
-            &actions,
-            Duration::from_secs(60),
-        )?;
-        Ok((StepState::Done, "Sign-in configured.".to_owned(), ()))
-    })?;
-
-    // 6. access
-    steps.run("access", JOIN_STEPS[5].1, |r| {
-        execute_actions(
-            ctx,
-            &store,
-            &mut state,
-            r,
-            &access_actions,
-            Duration::from_secs(120),
-        )?;
-        Ok((StepState::Done, state.options.login_access.describe(), ()))
-    })?;
-
-    // 7. home
-    let facts = SystemFacts {
-        mkhomedir_already_enabled: state.mkhomedir_was_enabled,
-        ..system::gather_facts(ctx.paths)
+    // 5-9. everything after the computer account exists
+    let options = state.options.clone();
+    let preferred_dc = state.domain_controller.clone();
+    let pj = PostJoin {
+        domain: &domain,
+        options: &options,
+        verify_user: req.verify_user.as_deref(),
+        preferred_dc: preferred_dc.as_deref(),
+        steps: &POST_JOIN_STEPS,
+        undo_disabled: false,
+        track_unfinished: true,
     };
-    steps.run("home", JOIN_STEPS[6].1, |r| {
-        if !req.options.create_home {
-            return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
-        }
-        let actions = backend.enable_login_integration(&facts);
-        if actions.is_empty() {
-            return Ok((
-                StepState::Skipped,
-                "Already enabled on this computer.".to_owned(),
-                (),
-            ));
-        }
-        execute_actions(
-            ctx,
-            &store,
-            &mut state,
-            r,
-            &actions,
-            Duration::from_secs(60),
-        )?;
-        Ok((
-            StepState::Done,
-            "Home folders will be created on first login.".to_owned(),
-            (),
-        ))
-    })?;
-
-    // 8. display
-    steps.run("display", JOIN_STEPS[7].1, |r| {
-        if !req.options.manual_login {
-            return Ok((StepState::Skipped, "Turned off in options.".to_owned(), ()));
-        }
-        let actions = backend.enable_manual_login(&facts);
-        if actions.is_empty() {
-            return Ok((
-                StepState::Skipped,
-                format!(
-                    "No change needed for this login screen ({:?}).",
-                    info.display_manager
-                ),
-                (),
-            ));
-        }
-        execute_actions(
-            ctx,
-            &store,
-            &mut state,
-            r,
-            &actions,
-            Duration::from_secs(60),
-        )?;
-        Ok((StepState::Done, "Login screen updated.".to_owned(), ()))
-    })?;
-    store
-        .save(&state)
-        .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
-
-    // 9. verify
-    steps.run("verify", JOIN_STEPS[8].1, |r| {
-        let mut notes = Vec::new();
-        let klist = ctx
-            .runner
-            .run(&CommandSpec::new("klist", &["-k", "/etc/krb5.keytab"]))
-            .map_err(|e| StepError(format!("Could not read the computer's Kerberos keys: {e}")))?;
-        r.log_command("klist -k /etc/krb5.keytab", &klist);
-        let principal = keytab_principal(&klist.stdout)
-            .ok_or("The computer's Kerberos key file has no entries. The join did not complete properly.")?;
-        let kinit = ctx
-            .runner
-            .run(&CommandSpec::new(
-                "kinit",
-                &["-k", "-t", "/etc/krb5.keytab", "-c", "MEMORY:rabita-verify", &principal],
-            ))
-            .map_err(|e| StepError(format!("Could not run kinit: {e}")))?;
-        r.log_command(&format!("kinit -k -t /etc/krb5.keytab -c MEMORY:rabita-verify {principal}"), &kinit);
-        if !kinit.success() {
-            return Err(StepError(format!(
-                "The computer could not get a Kerberos ticket: {}",
-                last_lines(&kinit.combined(), 2)
-            )));
-        }
-        notes.push("Kerberos ticket OK".to_owned());
-        if let Some(user) = req.verify_user.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-            let mut found = false;
-            for _ in 0..5 {
-                let getent = ctx
-                    .runner
-                    .run(&CommandSpec::new("getent", &["passwd", user]))
-                    .map_err(|e| StepError(format!("Could not run getent: {e}")))?;
-                r.log_command(&format!("getent passwd {user}"), &getent);
-                if getent.success() && !getent.stdout.trim().is_empty() {
-                    found = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(if ctx.network { 2 } else { 0 }));
-            }
-            if !found {
-                return Err(StepError(format!(
-                    "Joined, but the user '{user}' could not be looked up yet. Wait a minute and check Status; if it still fails, check the user name."
-                )));
-            }
-            notes.push(format!("user '{user}' found"));
-        }
-        Ok((StepState::Done, notes.join("; "), ()))
-    })?;
-    Ok(())
+    run_post_join(
+        ctx,
+        &store,
+        &mut state,
+        backend.as_ref(),
+        info.display_manager,
+        &pj,
+        steps,
+    )
 }
 
 /// Whether a package is installed, according to the package manager.
@@ -850,7 +1185,6 @@ mod tests {
     use super::*;
     use crate::cmd::FakeRunner;
     use crate::progress::Collector;
-    use crate::types::JoinOptions;
 
     const KLIST: &str = "\
 Keytab name: FILE:/etc/krb5.keytab
@@ -912,7 +1246,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         // Simulate realmd writing sssd.conf: write it before the job since the
         // fake runner has no side effects. Backups must still record it as the
@@ -952,14 +1286,23 @@ KVNO Principal
         assert!(conf.contains("use_fully_qualified_names = False"));
         assert!(conf.contains("fallback_homedir = /home/%u"));
         assert!(conf.contains("cache_credentials = True"));
-        assert!(conf.contains("default_domain_suffix = lab.quietbyte.test"));
+        assert!(!conf.contains("default_domain_suffix"), "{conf}");
+        assert!(!conf.contains("config_file_version"), "{conf}");
 
         // PAM and GDM steps planned (no display manager detected -> display skipped).
         let lines = fake.call_lines();
         assert!(lines
             .iter()
             .any(|l| l.starts_with("pam-auth-update --package --enable sss --enable")));
-        assert!(lines.iter().any(|l| l == "systemctl restart sssd"));
+        let check = lines
+            .iter()
+            .position(|l| l == "sssctl config-check")
+            .expect("sssctl config-check");
+        let restart = lines
+            .iter()
+            .position(|l| l == "systemctl restart sssd")
+            .expect("restart");
+        assert!(check < restart, "config is checked before sssd restarts");
         assert!(lines
             .iter()
             .any(|l| l
@@ -968,6 +1311,9 @@ KVNO Principal
         // State saved for leave.
         let state = Store::new(paths.clone()).load().unwrap();
         assert!(state.joined);
+        assert_eq!(state.setup_finished, Some(true));
+        assert_eq!(state.remaining_steps, Vec::<String>::new());
+        assert!(!result.joined_not_finished);
         assert_eq!(state.domain.as_deref(), Some("lab.quietbyte.test"));
         assert_eq!(state.computer_name.as_deref(), Some("LAB-PC-01"));
         assert!(state
@@ -1006,7 +1352,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let mut req = request();
         req.verify_user = None;
@@ -1062,7 +1408,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let mut req = request();
         req.options.login_access = LoginAccess::Groups {
@@ -1107,7 +1453,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let result = run_join(&ctx, &request(), Zeroizing::new("bad".into()));
         assert!(!result.ok);
@@ -1146,7 +1492,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let result = run_join(&ctx, &request(), Zeroizing::new("x".into()));
         assert!(!result.ok);
@@ -1188,7 +1534,7 @@ KVNO Principal
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let result = run_join(&ctx, &request(), Zeroizing::new("x".into()));
         assert!(!result.ok);
@@ -1215,11 +1561,458 @@ KVNO Principal
 
     #[test]
     fn configures_sssd_text() {
-        let out = configure_sssd_text(realmd_sssd_conf(), "lab.quietbyte.test", false);
-        assert!(out.contains("[sssd]\ndomains = lab.quietbyte.test\nconfig_file_version = 2\nservices = nss, pam\ndefault_domain_suffix = lab.quietbyte.test\n"));
+        let out = configure_sssd_text(realmd_sssd_conf(), "lab.quietbyte.test", false, None);
+        assert!(out.contains("[sssd]\ndomains = lab.quietbyte.test\nservices = nss, pam\n\n"));
         assert!(out.contains("cache_credentials = False"));
         assert!(out.contains("ad_gpo_access_control = permissive"));
+        assert!(!out.contains("ad_server"), "no preferred DC, no ad_server");
         assert_eq!(out.matches("use_fully_qualified_names").count(), 1);
+    }
+
+    /// Lab bug: SSSD 2.10+ refuses to start with `default_domain_suffix`
+    /// plus `use_fully_qualified_names = False`. Both it and
+    /// `config_file_version` must go, even if an older Rabita wrote them.
+    #[test]
+    fn sssd_conf_drops_suffix_and_version_and_prefers_the_dc() {
+        let old = "[sssd]\ndomains = lab.quietbyte.test\nconfig_file_version = 2\nservices = nss, pam\ndefault_domain_suffix = lab.quietbyte.test\n\n[domain/lab.quietbyte.test]\nid_provider = ad\nuse_fully_qualified_names = False\ndefault_domain_suffix = lab.quietbyte.test\n";
+        assert!(sssd_conf_needs_repair(old));
+        let out = configure_sssd_text(
+            old,
+            "lab.quietbyte.test",
+            true,
+            Some("bdc-2021.lab.quietbyte.test"),
+        );
+        assert!(!out.contains("default_domain_suffix"), "{out}");
+        assert!(!out.contains("config_file_version"), "{out}");
+        assert!(!sssd_conf_needs_repair(&out));
+        assert!(out.contains("use_fully_qualified_names = False\n"));
+        assert!(out.contains("ad_server = bdc-2021.lab.quietbyte.test, _srv_\n"));
+        // Running it again changes nothing.
+        assert_eq!(
+            configure_sssd_text(
+                &out,
+                "lab.quietbyte.test",
+                true,
+                Some("bdc-2021.lab.quietbyte.test")
+            ),
+            out
+        );
+    }
+
+    fn output(code: i32, stdout: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(code),
+            stdout: stdout.to_owned(),
+            ..CommandOutput::default()
+        }
+    }
+
+    #[test]
+    fn reads_sssctl_config_check_results() {
+        let clean = "Issues identified by validators: 0\n\nMessages generated during configuration merging: 0\n\nUsed configuration snippet files: 0\n";
+        assert_eq!(sssctl_problems(&output(0, clean)), Vec::<String>::new());
+        let bad = "Issues identified by validators: 1\n[rule/allowed_sssd_options]: Attribute 'default_domain_suffx' is not allowed in section 'sssd'. Check for typos.\n\nMessages generated during configuration merging: 0\n";
+        let expected = ["[rule/allowed_sssd_options]: Attribute 'default_domain_suffx' is not allowed in section 'sssd'. Check for typos."];
+        assert_eq!(sssctl_problems(&output(1, bad)), expected);
+        // Some sssctl versions exit 0 even when validators complain.
+        assert_eq!(sssctl_problems(&output(0, bad)), expected);
+        let perms = "File ownership and permissions check failed. Expected root:root and 0600.\n";
+        assert_eq!(sssctl_problems(&output(1, perms)).len(), 1);
+        // Failure with nothing recognisable still counts, with its last lines.
+        assert_eq!(
+            sssctl_problems(&output(3, "odd\nfailure\n")),
+            ["odd / failure"]
+        );
+    }
+
+    #[test]
+    fn reads_which_dc_adcli_used() {
+        let out = " * Resolving: _ldap._tcp.lab.quietbyte.test\n * Using domain controller: bdc-2021.lab.quietbyte.test\n * Successfully enrolled machine in realm\n";
+        assert_eq!(
+            used_domain_controller(out).as_deref(),
+            Some("bdc-2021.lab.quietbyte.test")
+        );
+        assert_eq!(used_domain_controller("Successfully enrolled"), None);
+        assert!(is_discovery_failure(
+            "realm: No such realm found: bdc-2021.lab.quietbyte.test"
+        ));
+        assert!(!is_discovery_failure("Couldn't authenticate as joiner"));
+    }
+
+    /// Replays the lab domain: BDC-2021 is healthy; DC-B1-4 is reachable
+    /// but its clock is 167 s off; two old records are dead.
+    struct LabNetwork;
+
+    impl Network for LabNetwork {
+        fn discover(&self, _: &str, _: &dyn Runner, _: &Paths) -> crate::types::DiscoveryResult {
+            let dc =
+                |host: &str, reachable: bool, offset: Option<f64>| crate::types::DomainController {
+                    host: host.into(),
+                    port: 389,
+                    priority: 0,
+                    weight: 100,
+                    reachable,
+                    clock_offset_secs: offset,
+                    in_client_site: false,
+                    recommended: false,
+                    warning: None,
+                };
+            let mut controllers = vec![
+                dc("dc-b1-4.lab.quietbyte.test", true, Some(167.0)),
+                dc("bdc-2021.lab.quietbyte.test", true, Some(1.0)),
+                dc("dc-a.lab.quietbyte.test", true, Some(3.0)),
+                dc("dc-b.lab.quietbyte.test", true, Some(-2.0)),
+                dc("old-dc1.lab.quietbyte.test", false, None),
+                dc("old-dc2.lab.quietbyte.test", false, None),
+            ];
+            let ranking = discover::rank_controllers(&mut controllers, &[]);
+            crate::types::DiscoveryResult {
+                domain: "lab.quietbyte.test".into(),
+                realm: "LAB.QUIETBYTE.TEST".into(),
+                found: true,
+                controllers,
+                problem: None,
+                client_site: None,
+                recommended: ranking.recommended,
+                majority_clock_offset_secs: ranking.majority_offset,
+                warnings: ranking.warnings,
+            }
+        }
+
+        fn clock_offset(&self, _: &str) -> Option<f64> {
+            None
+        }
+    }
+
+    fn logs(c: &Collector) -> Vec<String> {
+        c.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::progress::ProgressEvent::Log(l) => Some(l),
+                crate::progress::ProgressEvent::Step { .. } => None,
+            })
+            .collect()
+    }
+
+    fn realm_join_calls(fake: &FakeRunner) -> Vec<CommandSpec> {
+        fake.calls()
+            .into_iter()
+            .filter(|c| c.program == "realm" && c.args.first().is_some_and(|a| a == "join"))
+            .collect()
+    }
+
+    /// Lab bug: Rabita recommended BDC-2021 but realm picked DC-B1-4
+    /// (167 s drift) itself. The join must go through the recommended DC.
+    #[test]
+    fn joins_through_the_recommended_dc() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .ok(
+                "realm join",
+                " * Using domain controller: bdc-2021.lab.quietbyte.test\n * Successfully enrolled machine in realm\n",
+            )
+            .ok("klist", KLIST)
+            .ok("getent", "amna:*:1001:1001::/home/amna:/bin/bash");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: Some(&LabNetwork),
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(result.ok, "{}", result.summary);
+
+        let joins = realm_join_calls(&fake);
+        assert_eq!(joins.len(), 1);
+        assert_eq!(
+            joins[0].args.last().map(String::as_str),
+            Some("bdc-2021.lab.quietbyte.test"),
+            "realm must be pointed at the recommended DC, not left to choose"
+        );
+        let time = result.steps.iter().find(|s| s.id == "time").unwrap();
+        assert!(
+            time.message
+                .starts_with("Found bdc-2021.lab.quietbyte.test."),
+            "{}",
+            time.message
+        );
+        let join = result.steps.iter().find(|s| s.id == "join").unwrap();
+        assert_eq!(
+            join.message,
+            "Joined lab.quietbyte.test using domain controller bdc-2021.lab.quietbyte.test."
+        );
+        // SSSD keeps preferring it afterwards.
+        let conf = fs::read_to_string(paths.sssd_conf()).unwrap();
+        assert!(
+            conf.contains("ad_server = bdc-2021.lab.quietbyte.test, _srv_"),
+            "{conf}"
+        );
+        let state = Store::new(paths).load().unwrap();
+        assert_eq!(
+            state.domain_controller.as_deref(),
+            Some("bdc-2021.lab.quietbyte.test")
+        );
+        // The majority clock is fine, so nothing touched time sync.
+        assert!(!fake
+            .call_lines()
+            .iter()
+            .any(|l| l.contains("timesyncd") || l.starts_with("chronyc")));
+    }
+
+    #[test]
+    fn falls_back_to_the_domain_when_realm_cannot_use_the_dc() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .fail(
+                "realm join",
+                "realm: No such realm found: bdc-2021.lab.quietbyte.test",
+            )
+            .ok(
+                "realm join",
+                " * Using domain controller: dc-a.lab.quietbyte.test\n",
+            )
+            .ok("klist", KLIST)
+            .ok("getent", "amna:*:1001:1001::/home/amna:/bin/bash");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: Some(&LabNetwork),
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(result.ok, "{}", result.summary);
+        let joins = realm_join_calls(&fake);
+        assert_eq!(joins.len(), 2);
+        assert_eq!(
+            joins[0].args.last().map(String::as_str),
+            Some("bdc-2021.lab.quietbyte.test")
+        );
+        assert_eq!(
+            joins[1].args.last().map(String::as_str),
+            Some("lab.quietbyte.test")
+        );
+        assert_eq!(joins[1].stdin.as_deref().map(String::as_str), Some("pw\n"));
+        assert!(logs(&collector)
+            .iter()
+            .any(|l| l.contains("letting it choose a domain controller")));
+        let join = result.steps.iter().find(|s| s.id == "join").unwrap();
+        assert!(
+            join.message
+                .contains("not the recommended bdc-2021.lab.quietbyte.test"),
+            "{}",
+            join.message
+        );
+    }
+
+    /// Lab bug: a step after the join failed and nothing said so; later
+    /// steps never ran and the user got in without a home folder.
+    #[test]
+    fn config_check_errors_leave_the_computer_joined_but_not_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        fs::create_dir_all(paths.sssd_conf().parent().unwrap()).unwrap();
+        fs::write(paths.sssd_conf(), realmd_sssd_conf()).unwrap();
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .ok("realm join", "")
+            .respond(
+                "sssctl config-check",
+                output(
+                    1,
+                    "Issues identified by validators: 1\n[rule/allowed_domain_options]: Attribute 'ad_servr' is not allowed in section 'domain/lab.quietbyte.test'. Check for typos.\n",
+                ),
+            );
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(!result.ok);
+        assert!(result.joined_not_finished);
+        assert_eq!(result.remaining_steps, POST_JOIN_STEPS);
+        assert!(result.summary.starts_with(
+            "This computer is joined to lab.quietbyte.test but not finished. The new sign-in settings in /etc/sssd/sssd.conf have errors, so the sign-in service was not restarted: [rule/allowed_domain_options]: Attribute 'ad_servr'"
+        ), "{}", result.summary);
+        assert!(result.summary.ends_with(
+            "run Finish setup (rabitactl finish) to complete the remaining steps: Set up sign-in, Choose who can sign in, Create home folders on first login, Show a username box on the login screen, Check that it works."
+        ), "{}", result.summary);
+        let lines = fake.call_lines();
+        assert!(
+            !lines.iter().any(|l| l == "systemctl restart sssd"),
+            "bad config must not be started"
+        );
+        assert!(!lines
+            .iter()
+            .any(|l| l.starts_with("pam-auth-update") || l.starts_with("realm permit")));
+        let state_of = |id: &str| result.steps.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(state_of("sssd").state, StepState::Failed);
+        assert_eq!(state_of("home").state, StepState::Skipped);
+        assert_eq!(
+            state_of("home").message,
+            "Not run yet. Finish setup will run it."
+        );
+        let state = Store::new(paths.clone()).load().unwrap();
+        assert!(state.joined);
+        assert_eq!(state.setup_finished, Some(false));
+        assert_eq!(state.remaining_steps, POST_JOIN_STEPS);
+
+        // Once the problem is fixed, Finish setup (ApplyOptions with the
+        // saved options) runs every remaining step.
+        let fixed = FakeRunner::new();
+        fixed
+            .ok(
+                "realm list",
+                "lab.quietbyte.test\n  configured: kerberos-member\n",
+            )
+            .ok("klist", KLIST)
+            .ok("getent", "amna:*:1001:1001::/home/amna:/bin/bash");
+        let ctx = JobContext {
+            runner: &fixed,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let done = crate::service::apply_options_job(&ctx, &state.options);
+        assert!(done.ok, "{}", done.summary);
+        assert!(!done.joined_not_finished);
+        assert_eq!(
+            done.summary,
+            "Setup finished. This computer is fully connected to lab.quietbyte.test."
+        );
+        let ids: Vec<&str> = done.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, POST_JOIN_STEPS);
+        let lines = fixed.call_lines();
+        for expected in [
+            "sssctl config-check",
+            "systemctl restart sssd",
+            "realm permit --all",
+        ] {
+            assert!(
+                lines.contains(&expected.to_owned()),
+                "missing {expected}: {lines:?}"
+            );
+        }
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("pam-auth-update --package --enable sss")));
+        assert!(lines.iter().any(|l| l.starts_with("kinit -k")));
+        let state = Store::new(paths.clone()).load().unwrap();
+        assert_eq!(state.setup_finished, Some(true));
+        assert_eq!(state.remaining_steps, Vec::<String>::new());
+        assert!(!fs::read_to_string(paths.sssd_conf())
+            .unwrap()
+            .contains("config_file_version"));
+    }
+
+    #[test]
+    fn a_later_failure_lists_only_the_steps_still_to_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .ok("realm join", "")
+            .fail("pam-auth-update", "pam-auth-update: profile not found");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(!result.ok && result.joined_not_finished);
+        assert_eq!(result.remaining_steps, ["home", "display", "verify"]);
+        assert!(
+            result
+                .summary
+                .contains("pam-auth-update: profile not found"),
+            "{}",
+            result.summary
+        );
+        assert!(result.summary.ends_with(
+            "remaining steps: Create home folders on first login, Show a username box on the login screen, Check that it works."
+        ));
+        let state_of = |id: &str| result.steps.iter().find(|s| s.id == id).unwrap().state;
+        assert_eq!(state_of("sssd"), StepState::Done);
+        assert_eq!(state_of("access"), StepState::Done);
+        assert_eq!(state_of("home"), StepState::Failed);
+        assert_eq!(state_of("verify"), StepState::Skipped);
+        let state = Store::new(paths).load().unwrap();
+        assert_eq!(state.remaining_steps, ["home", "display", "verify"]);
+    }
+
+    #[test]
+    fn realm_failing_after_adding_the_computer_is_joined_but_not_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        let fake = FakeRunner::new();
+        // Not a member when the job starts; a member after realm failed.
+        fake.ok("realm list", "")
+            .ok(
+                "realm list",
+                "lab.quietbyte.test\n  configured: kerberos-member\n",
+            )
+            .ok("dpkg-query", "install ok installed")
+            .fail("realm join", "realm: Couldn't start the sssd service");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(!result.ok && result.joined_not_finished);
+        assert_eq!(result.remaining_steps, POST_JOIN_STEPS);
+        assert!(result.summary.starts_with(
+            "This computer is joined to lab.quietbyte.test but not finished. The computer was added to the domain, but realm then reported a problem"
+        ), "{}", result.summary);
+        let state = Store::new(paths).load().unwrap();
+        assert!(state.joined);
+        assert_eq!(state.setup_finished, Some(false));
+    }
+
+    #[test]
+    fn a_second_join_points_an_unfinished_computer_to_finish_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = lab(dir.path());
+        Store::new(paths.clone())
+            .save(&State {
+                domain: Some("lab.quietbyte.test".into()),
+                joined: true,
+                setup_finished: Some(false),
+                remaining_steps: vec!["home".into()],
+                ..State::default()
+            })
+            .unwrap();
+        let fake = FakeRunner::new();
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(!result.ok);
+        assert_eq!(
+            result.summary,
+            "This computer is already joined to lab.quietbyte.test but not finished. Run Finish setup (rabitactl finish) to complete it, or Leave domain to start again."
+        );
+        assert_eq!(realm_join_calls(&fake).len(), 0);
     }
 
     #[test]
