@@ -1,0 +1,53 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rabita Setup</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="js/main.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="banner" aria-label="Setup steps">
+        <svg class="rings" viewBox="0 0 400 400" aria-hidden="true">
+          <circle class="ring ring-a" cx="200" cy="200" r="150" />
+          <circle class="ring ring-b" cx="200" cy="200" r="190" />
+        </svg>
+        <div class="brand">
+          <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+            <line class="link" x1="19" y1="45" x2="45" y2="19" />
+            <circle class="node node-a" cx="19" cy="45" r="10" />
+            <circle class="node node-b" cx="45" cy="19" r="10" />
+          </svg>
+          <div>
+            <p class="brand-name">Rabita</p>
+            <p class="brand-sub">Setup</p>
+          </div>
+        </div>
+        <ol class="steps" id="steps"></ol>
+        <p class="banner-foot">Rabita means “connection”.</p>
+      </aside>
+
+      <main class="content" id="content" aria-live="polite"></main>
+
+      <footer class="buttons">
+        <button class="btn" id="extra" type="button" hidden></button>
+        <span class="spacer"></span>
+        <button class="btn" id="back" type="button">‹ Back</button>
+        <button class="btn primary" id="next" type="button">Next ›</button>
+        <button class="btn" id="cancel" type="button">Cancel</button>
+      </footer>
+    </div>
+
+    <dialog id="confirm" aria-labelledby="confirm-title">
+      <p class="dialog-title" id="confirm-title">Close Rabita Setup?</p>
+      <p>Nothing on this computer has been changed yet.</p>
+      <div class="dialog-buttons">
+        <button class="btn" id="confirm-stay" type="button">Keep going</button>
+        <button class="btn primary" id="confirm-quit" type="button">Close</button>
+      </div>
+    </dialog>
+  </body>
+</html>

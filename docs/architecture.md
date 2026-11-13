@@ -69,6 +69,17 @@ live and no D-Bus call waits on `apt-get`.
   backups in `/var/lib/rabita/backups/<timestamp>/`. "Leave domain" walks that
   list in reverse.
 
+## The wizard (Milestone 3)
+
+`rabita-app` is a Tauri 2 window whose page lives in `app/ui` (TypeScript,
+HTML, CSS, bundled Manrope font). The page calls Rust commands
+(`detect_system`, `discover_domain`, `status`, `join`, `apply_options`),
+which pass the helper's JSON straight through. Before a job starts, the Rust
+side subscribes to the helper's `Progress`, `LogLine` and `JobFinished`
+signals and forwards them to the page as events, so the checklist updates
+live. The app refuses to run as root and has a strict content-security
+policy; it loads nothing from the internet.
+
 ## Lab tooling
 
 - `rabitactl` — CLI test harness; talks to the helper over D-Bus exactly like

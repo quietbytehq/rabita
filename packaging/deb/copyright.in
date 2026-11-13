@@ -1,0 +1,17 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: rabita
+Upstream-Contact: QuietByte <https://github.com/quietbytehq/rabita>
+Source: https://github.com/quietbytehq/rabita
+Comment: The programs are written in Rust and statically link the crates
+ listed in Cargo.lock in the source, which are under the MIT, Apache-2.0
+ and similar permissive licences.
+
+Files: *
+Copyright: 2026 QuietByte
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License, Version 2.0, is in
+ /usr/share/common-licenses/Apache-2.0.
+
+Files: app/ui/public/fonts/*
+Copyright: 2018 The Manrope Project Authors (https://github.com/googlefonts/manrope)
+License: OFL-1.1

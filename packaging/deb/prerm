@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+if [ "$1" = "remove" ]; then
+    if [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+        deb-systemd-invoke stop rabita-helper.service >/dev/null 2>&1 || true
+    fi
+    if [ -f /var/lib/rabita/state.json ]; then
+        echo "Rabita: this computer may still be connected to an organization." >&2
+        echo "Rabita: its backups stay in /var/lib/rabita so the original settings can be restored." >&2
+    fi
+fi
+
+exit 0

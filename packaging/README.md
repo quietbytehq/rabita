@@ -9,7 +9,9 @@ Native packages only (`.deb`, `.rpm`, AUR). No Snap, Flatpak or AppImage: sandbo
 | `dbus/`    | System-bus policy and activation file for `org.quietbyte.Rabita1`     | 1 (done)  |
 | `systemd/` | `rabita-helper.service` (system) and `rabita-agent.service` (user)    | 1 (done)  |
 | `desktop/` | "Rabita Setup" launcher entry                                          | 1 (done)  |
-| `deb/`     | Debian/Ubuntu packaging                                                | 8         |
+| `icons/`   | Logo SVG and PNG sizes (`render-icons.mjs` regenerates the PNGs)      | 3 (done)  |
+| `metainfo/`| AppStream description shown by App Center / GNOME Software            | 3 (done)  |
+| `deb/`     | `build-deb.sh` → `target/deb/rabita_<version>_<arch>.deb`             | 3 (first version) |
 | `rpm/`     | Fedora/RHEL/openSUSE spec                                              | 8         |
 | `aur/`     | PKGBUILD for Arch/Manjaro                                              | 8         |
 

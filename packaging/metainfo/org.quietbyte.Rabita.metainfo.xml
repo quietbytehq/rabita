@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<component type="desktop-application">
+  <id>org.quietbyte.Rabita</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Rabita Setup</name>
+  <summary>Connect this computer to your organization</summary>
+  <developer id="org.quietbyte">
+    <name>QuietByte</name>
+  </developer>
+  <description>
+    <p>
+      Rabita Setup is a friendly wizard that joins this computer to your
+      organization's Active Directory domain, so staff can sign in at the
+      normal login screen with their work username and password, even when
+      the network is down.
+    </p>
+    <p>
+      It installs and configures the standard tools for you, checks every
+      step, and backs up each file it changes.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.quietbyte.Rabita.desktop</launchable>
+  <url type="homepage">https://github.com/quietbytehq/rabita</url>
+  <url type="bugtracker">https://github.com/quietbytehq/rabita/issues</url>
+  <categories>
+    <category>System</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0~dev" date="2026-11-13">
+      <description>
+        <p>First preview: the setup wizard.</p>
+      </description>
+    </release>
+  </releases>
+</component>

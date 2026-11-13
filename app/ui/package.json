@@ -1,0 +1,16 @@
+{
+  "name": "rabita-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Rabita Setup wizard front end (compiled into the Tauri app)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build/copy-static.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
