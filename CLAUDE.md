@@ -39,8 +39,8 @@ rabita/
 1. Detect distro family, desktop, display manager (GDM/SDDM/LightDM).
 2. Install packages via the native manager: realmd, sssd, adcli, krb5 client, samba-common-tools (as needed), cifs-utils, cups, keyutils.
 3. Check time sync with the DC (Kerberos fails with clock skew; enable chrony/timesyncd against the DC if needed).
-4. `realm join` with the admin creds (stdin, never argv), optional OU and computer name.
-5. Configure SSSD: `use_fully_qualified_names = False`, `default_domain_suffix`, `cache_credentials = True`, `fallback_homedir = /home/%u`.
+4. `realm join` with the admin creds (stdin, never argv), optional OU and computer name, pointed at the recommended (healthiest) DC so realm cannot pick one with a bad clock.
+5. Configure SSSD: `use_fully_qualified_names = False`, `cache_credentials = True`, `fallback_homedir = /home/%u`, `ad_server = <recommended DC>, _srv_`. Never set `default_domain_suffix`: SSSD 2.10+ refuses to start when it is combined with `use_fully_qualified_names = False`. Remove `config_file_version`. Run `sssctl config-check` before restarting SSSD and stop with a clear error if it reports problems.
 6. Enable home-dir creation on first login (pam_mkhomedir / oddjob-mkhomedir).
 7. Hook into login:
    - Debian/Ubuntu: `pam-auth-update --enable sss mkhomedir`
@@ -49,6 +49,8 @@ rabita/
    - Arch/Manjaro: edit `/etc/pam.d/system-auth` carefully (backup first) + nsswitch
 8. Display manager: enable manual username entry ("Not listed?" / "Other user") — GDM `disable-user-list`, LightDM `greeter-show-manual-login=true`, SDDM theme setting.
 9. Verify: `id <testuser>` resolves and a Kerberos ticket can be obtained. Report pass/fail per step.
+
+If any step after the computer account is created fails, report the machine as "joined but not finished" and list the remaining steps. `ApplyOptions` (Finish setup) must be able to complete them.
 
 ## Drives and printers (agent)
 - Sources, in order: user's `homeDirectory`/`homeDrive` from LDAP; GPO Preferences `Drives.xml` and `Printers.xml` from `\\<domain>\SYSVOL\...\Policies\{GUID}\User\Preferences\` for GPOs that apply to the user (respect basic item-level targeting by security group in v1; document what's unsupported).

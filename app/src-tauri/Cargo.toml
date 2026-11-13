@@ -16,7 +16,19 @@ workspace = true
 name = "rabita-app"
 path = "src/main.rs"
 
-# Tauri 2 and the D-Bus client are added in Milestone 3. Keeping this crate
-# dependency-free for now means CI builds the whole workspace without the
-# WebKitGTK toolchain.
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+zeroize = "1"
+
+[features]
+# The UI is always served from the files compiled into the binary; there is
+# no development web server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

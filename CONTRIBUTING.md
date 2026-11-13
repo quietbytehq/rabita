@@ -15,6 +15,10 @@ Thanks for helping. A few ground rules keep the project safe and its licence cle
 ## Local checks
 
 ```bash
+npm --prefix app/ui ci && npm --prefix app/ui test
+```
+
+```bash
 cargo fmt --all --check
 ```
 

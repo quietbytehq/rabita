@@ -23,7 +23,7 @@ license = "Apache-2.0"
 repository = "https://github.com/quietbytehq/rabita"
 homepage = "https://github.com/quietbytehq/rabita"
 authors = ["QuietByte <https://github.com/quietbytehq>"]
-rust-version = "1.89"
+rust-version = "1.90"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

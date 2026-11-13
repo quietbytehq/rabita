@@ -13,6 +13,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Libraries the Tauri wizard (rabita-app) builds against.
+  GUI_BUILD_DEPS: libwebkit2gtk-4.1-dev libxdo-dev
 
 jobs:
   lint:
@@ -20,6 +22,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: GUI build libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q $GUI_BUILD_DEPS
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+      - name: Wizard front end (TypeScript)
+        run: |
+          npm --prefix app/ui ci --no-audit --no-fund
+          npm --prefix app/ui run build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -36,6 +49,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: GUI build libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q $GUI_BUILD_DEPS dbus
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+      - name: Wizard front end tests
+        run: |
+          npm --prefix app/ui ci --no-audit --no-fund
+          npm --prefix app/ui test
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build
@@ -47,18 +71,62 @@ jobs:
           ./target/debug/rabita-helper --help
           ./target/debug/rabitactl --help
           ./target/debug/rabita-agent
-          ./target/debug/rabita-app
       - name: D-Bus smoke test (private session bus)
-        run: |
-          sudo apt-get install -y -q dbus
-          scripts/dbus-smoke.sh target/debug
+        run: scripts/dbus-smoke.sh target/debug
 
   # Confirms the workspace still builds on the oldest Rust we promise to support.
   msrv:
-    name: Minimum supported Rust (1.89)
+    name: Minimum supported Rust (1.90)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89
+      - name: GUI build libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q $GUI_BUILD_DEPS
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+      - run: npm --prefix app/ui ci --no-audit --no-fund && npm --prefix app/ui run build
+      - uses: dtolnay/rust-toolchain@1.90
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
+
+  # Builds the .deb on the oldest supported release (Ubuntu 22.04), so the
+  # same package installs on 22.04, 24.04, 26.04, Debian 12+ and Mint 21+.
+  deb:
+    name: Debian package (.deb)
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Build tools
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends ca-certificates curl git build-essential pkg-config dpkg-dev file xz-utils $GUI_BUILD_DEPS
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the package
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/deb/build-deb.sh
+      - name: Install it like a user would
+        run: |
+          apt-get install -y -q ./target/deb/rabita_*.deb
+          test -x /usr/bin/rabita-app
+          test -x /usr/libexec/rabita-helper
+          test -f /usr/share/applications/org.quietbyte.Rabita.desktop
+          test -f /usr/share/polkit-1/actions/org.quietbyte.rabita.policy
+          test -f /usr/share/dbus-1/system.d/org.quietbyte.Rabita1.conf
+          rabitactl --version
+          apt-get remove -y -q rabita
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rabita-deb
+          path: target/deb/*.deb
+          if-no-files-found: error

@@ -19,7 +19,7 @@ consume them directly and the interface stays stable while the structures grow.
 | `Status()` | – | `s` JSON `StatusReport` | no | Membership, sssd config/service, keytab, Kerberos ticket, DC reachability, clock, home dirs, user lookup |
 | `Join(request s, password s)` | JSON `JoinRequest`, admin password | `u` job id | **yes** | Returns at once; progress via signals |
 | `Leave(request s, password s)` | JSON `LeaveRequest`, password (empty unless removing the computer account) | `u` job id | **yes** | Restores every backed-up file |
-| `ApplyOptions(options s)` | JSON `JoinOptions` | `u` job id | **yes** | Re-applies who-can-sign-in, home-folder and login-screen options |
+| `ApplyOptions(options s)` | JSON `JoinOptions` | `u` job id | **yes** | Re-applies who-can-sign-in, home-folder and login-screen options. On a computer that is joined but not finished it runs every post-join step to finish setup (see below) |
 
 Privileged methods check `org.quietbyte.rabita.manage` with
 `AllowUserInteraction`, so the desktop shows the normal authentication dialog.
@@ -87,6 +87,44 @@ members of those AD groups). Group mode runs `realm deny --all` followed by
 `realm permit -g <groups…>`, so the list is exact each time it is applied; a
 group list that is empty after trimming is rejected before anything changes.
 `Status` reports the current setting in the `login-access` check.
+
+## Joined but not finished
+
+`Join` creates the computer account in step `join`. The steps after it,
+`sssd`, `access`, `home`, `display` and `verify`, can still fail. When one
+does:
+
+- `JobResult.joined_not_finished` is `true`, `remaining_steps` lists the ids
+  still to run, and `summary` says in plain words that the computer is
+  joined but not finished and what to do. Steps that never ran are reported
+  as `skipped` with *Not run yet. Finish setup will run it.*
+- The helper's state file records the same. A second `Join` refuses and
+  points to Finish setup.
+- `Status` returns `setup_finished: false`, the same `remaining_steps`, and a
+  failing `setup` check. It also returns `options`, the choices saved at
+  join.
+
+**Finish setup** is `ApplyOptions` with those saved `options`. That is what
+`rabitactl finish` sends, so finishing never changes a choice; for example, a
+group restriction stays. `ApplyOptions` runs all five post-join steps, not
+only the option steps, when any of these holds:
+
+- setup is not finished;
+- the computer was joined by an older Rabita (`setup_finished` is `null`);
+- `sssd.conf` still contains `default_domain_suffix`, which stops SSSD 2.10+
+  from starting.
+
+All five steps are safe to repeat. On success `summary` is *Setup finished.
+This computer is fully connected to …*.
+
+The `sssd` step rewrites `sssd.conf` and runs `sssctl config-check`. If the
+checker reports problems, the step fails with them and SSSD is **not**
+restarted. If SSSD then fails to start, the last journal lines go to the log.
+
+The `join` step passes the recommended DC's host name to `realm join` instead
+of the domain name, so realmd enrols through that server. If realm cannot use
+it, the step retries with the domain name and logs a warning. The step
+message names the DC that adcli reports it used.
 
 ## Leave steps
 

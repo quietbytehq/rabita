@@ -2,9 +2,12 @@
 [Desktop Entry]
 Type=Application
 Name=Rabita Setup
+GenericName=Domain Setup
 Comment=Connect this computer to your organization
 Exec=rabita-app
 Icon=org.quietbyte.Rabita
 Terminal=false
-Categories=System;Settings;
-Keywords=domain;login;network drive;printer;
+StartupNotify=true
+StartupWMClass=rabita-app
+Categories=System;
+Keywords=domain;login;sign in;network drive;printer;organization;

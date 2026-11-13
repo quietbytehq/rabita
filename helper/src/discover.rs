@@ -31,6 +31,29 @@ pub const CLOCK_WARN_SECS: f64 = 60.0;
 /// DCs whose offsets are within this of each other are "in agreement".
 pub const CLOCK_AGREE_SECS: f64 = 60.0;
 
+/// The network probes a join needs. Jobs take one of these so tests can
+/// replay a real domain's layout (stale records, bad clocks) offline.
+pub trait Network: Send + Sync {
+    /// Finds, probes and ranks the domain controllers of `domain`.
+    fn discover(&self, domain: &str, runner: &dyn Runner, paths: &Paths) -> DiscoveryResult;
+    /// Measures one domain controller's clock offset in seconds.
+    fn clock_offset(&self, host: &str) -> Option<f64>;
+}
+
+/// The real network: DNS, TCP and SNTP.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LiveNetwork;
+
+impl Network for LiveNetwork {
+    fn discover(&self, domain: &str, runner: &dyn Runner, paths: &Paths) -> DiscoveryResult {
+        discover(domain, runner, paths, true)
+    }
+
+    fn clock_offset(&self, host: &str) -> Option<f64> {
+        sntp::clock_offset(host, Duration::from_secs(3)).ok()
+    }
+}
+
 /// Normalises what the user typed into `(domain, realm)`.
 #[must_use]
 pub fn normalise_domain(input: &str) -> (String, String) {

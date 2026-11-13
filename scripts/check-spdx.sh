@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 missing=0
 while IFS= read -r f; do
   case "$f" in
-    *.rs|*.toml|*.sh|*.yml|*.yaml|*.html|*.css|*.ts|*.js|*.service|*.conf|*.policy|*.desktop|*.md)
+    *.rs|*.toml|*.sh|*.yml|*.yaml|*.html|*.css|*.ts|*.js|*.mjs|*.xml|*.svg|*.service|*.conf|*.policy|*.desktop|*.md)
       if ! head -5 "$f" | grep -q "SPDX-License-Identifier: Apache-2.0"; then
         echo "missing SPDX header: $f"
         missing=1

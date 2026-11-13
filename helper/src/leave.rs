@@ -57,6 +57,7 @@ pub fn run_leave(
             Err(e) => e.0,
         },
         steps,
+        ..JobResult::default()
     }
 }
 
@@ -302,7 +303,7 @@ mod tests {
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let result = run_leave(
             &ctx,
@@ -354,7 +355,7 @@ mod tests {
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let req = LeaveRequest {
             remove_computer_account: true,
@@ -387,7 +388,7 @@ mod tests {
             runner: &fake,
             paths: &paths,
             sink: &collector,
-            network: false,
+            network: None,
         };
         let result = run_leave(
             &ctx,

@@ -3,40 +3,32 @@
 
 //! `rabita-app` — the "Rabita Setup" wizard window.
 //!
-//! This is the Rust side of the Tauri 2 application. It never runs as root;
-//! all privileged work is requested from `rabita-helper` over D-Bus.
-//!
-//! Milestone 1 ships a stub. The six wizard screens are wired up in
-//! Milestone 3.
+//! This is the Rust side of the Tauri 2 application. It never runs as root:
+//! everything privileged is asked of `rabita-helper` over D-Bus, and polkit
+//! shows the usual password dialog when the helper needs permission.
 
-/// Package version, injected by Cargo at build time.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The wizard steps, in order, as shown in the left banner.
-const STEPS: [&str; 6] = [
-    "Welcome",
-    "Your organization",
-    "IT admin sign-in",
-    "Choose options",
-    "Setting up",
-    "Finish",
-];
+mod bridge;
 
 fn main() {
-    println!("rabita-app {VERSION} (stub)");
-    for (i, step) in STEPS.iter().enumerate() {
-        println!("  {}. {step}", i + 1);
+    if bridge::running_as_root() {
+        eprintln!(
+            "Rabita Setup must not be run as root. Open it as a normal user; it asks for an administrator password when it needs one."
+        );
+        std::process::exit(1);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::STEPS;
-
-    #[test]
-    fn wizard_has_six_steps_in_order() {
-        assert_eq!(STEPS.first(), Some(&"Welcome"));
-        assert_eq!(STEPS.last(), Some(&"Finish"));
-        assert_eq!(STEPS.len(), 6);
+    let result = tauri::Builder::default()
+        .manage(bridge::Bridge::default())
+        .invoke_handler(tauri::generate_handler![
+            bridge::detect_system,
+            bridge::discover_domain,
+            bridge::status,
+            bridge::join,
+            bridge::apply_options,
+            bridge::quit,
+        ])
+        .run(tauri::generate_context!());
+    if let Err(e) = result {
+        eprintln!("Rabita Setup could not start: {e}");
+        std::process::exit(1);
     }
 }

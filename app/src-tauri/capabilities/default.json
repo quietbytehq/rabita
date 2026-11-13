@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The wizard window may listen for the helper's progress events. The app's own commands (detect, discover, join, ...) are allowed by default.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

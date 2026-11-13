@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+if [ "$1" = "configure" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    # Let the system bus pick up the policy for org.quietbyte.Rabita1 now,
+    # not after the next reboot.
+    if command -v busctl >/dev/null 2>&1; then
+        busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0

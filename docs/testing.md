@@ -133,6 +133,9 @@ Run the same command with the correct password.
 - [ ] The "Find the domain and check the clock" step names the recommended
       DC and, if the domain has stale records or bad clocks, says how many
       warnings there are; the details log lists them.
+- [ ] The "Join the domain" step says *Joined lab.quietbyte.test using
+      domain controller X*, where X is the `recommended` DC from
+      `rabitactl discover`, not whichever DC realm would have picked.
 - [ ] Verify step reports *Kerberos ticket OK; user 'amna' found*.
 
 Checks from the shell:
@@ -155,12 +158,86 @@ rabitactl status
       is filled in; `joined_at` is now. The "Domain controller health" check
       shows `warning: true` and lists stale records or bad clocks if the
       domain has any.
+- [ ] The "Setup" check in `rabitactl status` says *Finished*.
 - [ ] `sudo cat /etc/sssd/sssd.conf` contains
       `use_fully_qualified_names = False`, `fallback_homedir = /home/%u`,
-      `cache_credentials = True`, `default_domain_suffix = lab.quietbyte.test`.
+      `cache_credentials = True` and `ad_server = <recommended DC>, _srv_`.
+      It does **not** contain `default_domain_suffix` or `config_file_version`.
+- [ ] `sudo sssctl config-check` prints *Issues identified by validators: 0*
+      and `systemctl is-active sssd` prints `active` (tested on SSSD 2.12,
+      which refuses to start with the old settings).
 - [ ] `sudo ls /var/lib/rabita/backups/*/` lists the backed-up files
       (`etc__krb5.conf`, `etc__pam.d__common-session`, …).
 - [ ] On the DC: the computer object exists in the Linux PCs OU.
+
+### 4b. Joined but not finished, then Finish setup
+
+This forces a failure after the computer account exists, to check that
+Rabita says so and can finish later. Start from a fresh snapshot.
+
+Install the packages first, so the forced failure does not hit the package
+step (installing `libpam-sss` runs `pam-auth-update` itself):
+
+```bash
+sudo apt-get install -y realmd sssd sssd-tools adcli krb5-user libnss-sss libpam-sss samba-common-bin cifs-utils keyutils cups
+```
+
+```bash
+sudo chmod -x /usr/sbin/pam-auth-update
+```
+
+```bash
+rabitactl join lab.quietbyte.test --user joiner --verify-user amna
+```
+
+- [ ] The run ends with `JOINED BUT NOT FINISHED` and a summary that starts
+      *This computer is joined to lab.quietbyte.test but not finished*, says
+      what failed, and lists the remaining steps: *Create home folders on
+      first login, Show a username box on the login screen, Check that it
+      works*.
+- [ ] `rabitactl status`: the "Setup" check fails with *Joined but not
+      finished. Still to do: …*.
+- [ ] Running the join again refuses with *… already joined to
+      lab.quietbyte.test but not finished. Run Finish setup …*.
+
+Put the tool back and finish:
+
+```bash
+sudo chmod +x /usr/sbin/pam-auth-update
+```
+
+```bash
+rabitactl finish
+```
+
+- [ ] `SUCCESS` and *Setup finished. This computer is fully connected to
+      lab.quietbyte.test.* All five steps (sign-in, who can sign in, home
+      folders, login screen, check) ran.
+- [ ] `rabitactl status`: "Setup" says *Finished*.
+- [ ] Logging in as `amna` creates `/home/amna`.
+- [ ] `rabitactl finish` uses the choices made at join: if you joined with
+      `--allow-group`, the group list is unchanged afterwards.
+
+### 4c. Repair a computer joined by an earlier build
+
+On the Ubuntu 26.04 VM that was joined before this fix (SSSD not starting,
+no home folder), without restoring the snapshot:
+
+```bash
+rabitactl status
+```
+
+- [ ] The "Sign-in configuration" check fails with *sssd.conf sets
+      default_domain_suffix, which stops SSSD 2.10 and newer from starting*,
+      and "Setup" warns *Joined by an earlier version of Rabita*.
+
+```bash
+rabitactl finish
+```
+
+- [ ] `SUCCESS`; `default_domain_suffix` and `config_file_version` are gone
+      from `/etc/sssd/sssd.conf`; `systemctl is-active sssd` prints `active`;
+      the next domain login gets a home folder.
 
 ### 5. Log in as a domain user
 
@@ -276,6 +353,11 @@ Then restore the VM snapshot.
 
 ### Known limits in this milestone
 
+- Rabita joins by giving realm the recommended DC's host name, so realmd
+  enrols through that server. If realm cannot use it by name, Rabita logs a
+  warning and retries with the domain name; the "Join the domain" step then
+  says which DC realm used.
+
 - SDDM (KDE) gets no login-screen change yet; most SDDM themes already offer
   "Other".
 - Who may sign in is now a choice (all domain users, or only listed groups).
@@ -284,6 +366,136 @@ Then restore the VM snapshot.
   list above is the way to restrict access.
 - Fedora, openSUSE and Arch backends are placeholders (Milestone 7).
 
-## Milestone 3 — wizard GUI
+## Milestone 3 — wizard GUI and .deb
 
-_To be written with the milestone._
+What this proves: a normal user can install Rabita by double-clicking a
+`.deb`, open **Rabita Setup** from the app menu, and connect the computer
+through the six screens without a terminal. Screenshots of every screen are
+in `docs/screenshots/`.
+
+Start from a fresh Ubuntu 24.04 (or 26.04) snapshot with GNOME, DNS pointing
+at the DC, as for Milestone 2. Do **not** install the Milestone 2 dev build
+on the same snapshot.
+
+### 1. Get the package
+
+- [ ] On the pull request on GitHub, open the **Checks** tab, choose the
+      latest **CI** run, and download the **rabita-deb** artifact (a zip).
+      Unzip it to get `rabita_0.1.0~dev_amd64.deb`.
+
+(Or build it yourself on an Ubuntu 22.04 machine with
+`packaging/deb/build-deb.sh`; the result lands in `target/deb/`.)
+
+### 2. Install with a double-click
+
+- [ ] Copy the `.deb` to the VM and double-click it in Files. The software
+      app opens (App Center on Ubuntu 24.04+, Software Manager / GDebi on
+      Mint, Software on Debian) and shows **Rabita Setup** with its logo
+      and description. Choose **Install** and enter your password.
+- [ ] If the software app refuses or does nothing, note what it said, then
+      install from a terminal instead:
+
+```bash
+sudo apt install ./rabita_0.1.0~dev_amd64.deb
+```
+
+- [ ] **Rabita Setup** appears in the app menu (search "domain" or
+      "Rabita") with the two-nodes logo.
+
+### 3. Look and feel
+
+Open **Rabita Setup** from the menu.
+
+- [ ] An 800 × 560 window titled *Rabita Setup*: dark navy, mango buttons,
+      Manrope font, left banner with the logo and the six steps, buttons
+      at the bottom (‹ Back, Next ›, Cancel).
+- [ ] Motion: the logo's two nodes pulse in turn and the line between them
+      flows; dotted rings turn slowly in the banner; the active step's dot
+      pulses; each screen slides in.
+- [ ] Turn on **Settings → Accessibility → Reduce animation**, close and
+      reopen Rabita Setup: nothing moves. Turn it back off.
+- [ ] `sudo rabita-app` in a terminal refuses with *must not be run as
+      root*.
+
+### 4. Welcome
+
+- [ ] Shows this computer's name, *Ubuntu 24.04…* and login screen *GNOME
+      (GDM)*. **Next** is enabled.
+
+### 5. Your organization
+
+- [ ] **Next** is disabled until a domain is found.
+- [ ] Type `LAB` and press **Find**: *Enter the full domain name with dots…*
+- [ ] Type `lab.quietbyte.test` and press Enter: a panel says *Found
+      lab.quietbyte.test*, how many DCs answered, which one will be used
+      (and your site), and any stale-record or clock warnings in plain words.
+
+### 6. IT admin sign-in
+
+- [ ] **Next** stays disabled until both user name and password are filled.
+- [ ] `LAB\joiner` is accepted (the `LAB\` part is dropped). **Show** /
+      **Hide** reveals the password. **Advanced** has Computer name and OU.
+
+### 7. Choose options
+
+- [ ] *Everyone in lab.quietbyte.test* is selected; choosing *Only members
+      of these groups* shows a box, and **Connect** stays disabled until a
+      group is typed.
+- [ ] Press **Connect**. The system's password dialog appears (polkit).
+      **Wait at least 30 seconds** before typing your password, to check a
+      slow answer still works.
+- [ ] Pressing **Cancel** in that dialog instead keeps you on this screen
+      with *Authentication was cancelled.*; **Connect** again works.
+
+### 8. Setting up
+
+- [ ] The checklist updates live, step by step; the mango progress bar
+      fills with a moving shimmer.
+- [ ] **Show details** reveals the technical log as it happens.
+- [ ] ‹ Back, Next and Cancel are disabled while it runs.
+
+### 9. Finish
+
+- [ ] *All done* with a tick that draws itself, and three plain next steps.
+      **Close** closes the window.
+- [ ] Sign out; on the login screen use **Not listed?**, sign in as `amna`;
+      the home folder is created.
+- [ ] Reopen Rabita Setup: Welcome says *already connected to
+      lab.quietbyte.test*.
+
+### 10. When things go wrong
+
+On a fresh snapshot each time:
+
+- [ ] Wrong admin password: the Finish screen says *This computer was not
+      connected* with the reason; **‹ Back** returns to IT admin sign-in with
+      the password box empty.
+- [ ] Joined but not finished: install the packages first and break
+      `pam-auth-update` as in Milestone 2 step 4b, then connect. The Finish
+      screen says *Almost done*, what went wrong, and what is still to do,
+      with a **Finish setup** button (no ‹ Back). Put `pam-auth-update` back
+      (`sudo chmod +x /usr/sbin/pam-auth-update`), press **Finish setup**:
+      only the five remaining steps run, then *All done*.
+- [ ] Close Rabita Setup halfway (Cancel or Esc on screens 2–4): it asks
+      *Close Rabita Setup?* first.
+
+### 11. Remove
+
+```bash
+sudo apt remove rabita
+```
+
+- [ ] The menu entry disappears. (Leave the domain first if the computer is
+      joined; Rabita's backups stay in `/var/lib/rabita` either way.)
+
+### Known limits in this milestone
+
+- The Status screen and **Leave domain** in the window come in Milestone 6;
+  a joined computer only shows *already connected* on Welcome, plus
+  **Finish setup** when setup is not finished. `rabitactl status` and
+  `rabitactl leave` still work.
+- The `.deb` is built on Ubuntu 22.04 for amd64. Other architectures and
+  the `.rpm` / AUR packages come in Milestone 8.
+- The admin password passes through the web page and the app's memory as
+  plain text for the moment it takes to send it to the helper; the Rust
+  side wipes its copy straight after. It is never written to disk.
