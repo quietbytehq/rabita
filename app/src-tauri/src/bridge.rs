@@ -36,6 +36,10 @@ trait Rabita {
     fn status(&self) -> zbus::Result<String>;
     fn join(&self, request: &str, password: &str) -> zbus::Result<u32>;
     fn apply_options(&self, options: &str) -> zbus::Result<u32>;
+    fn leave(&self, request: &str, password: &str) -> zbus::Result<u32>;
+    fn find_dns_servers(&self, domain: &str) -> zbus::Result<String>;
+    fn set_dns_server(&self, domain: &str, server: &str) -> zbus::Result<String>;
+    fn restore_dns(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
     #[zbus(signal)]
@@ -290,6 +294,65 @@ pub async fn apply_options(
         .map_err(|e| friendly(&e))?;
     tauri::async_runtime::spawn(forward(app, events, job));
     Ok(job)
+}
+
+/// Leaves the domain (or undoes an unfinished join) and returns the job
+/// id. The admin password, if any, is wiped straight after it is sent.
+#[tauri::command]
+pub async fn leave(
+    app: AppHandle,
+    bridge: State<'_, Bridge>,
+    request: String,
+    password: String,
+) -> Result<u32, String> {
+    let password = Zeroizing::new(password);
+    let proxy = bridge.proxy().await?;
+    let events = subscribe(&proxy).await?;
+    let job = proxy
+        .leave(&request, &password)
+        .await
+        .map_err(|e| friendly(&e))?;
+    drop(password);
+    tauri::async_runtime::spawn(forward(app, events, job));
+    Ok(job)
+}
+
+/// Looks on this network for DNS servers that know `domain` (`DnsSearch`).
+#[tauri::command]
+pub async fn find_dns_servers(bridge: State<'_, Bridge>, domain: String) -> Result<String, String> {
+    bridge
+        .proxy()
+        .await?
+        .find_dns_servers(&domain)
+        .await
+        .map_err(|e| friendly(&e))
+}
+
+/// Makes `server` this computer's DNS server (`DnsResult`); polkit asks for
+/// an administrator's password.
+#[tauri::command]
+pub async fn set_dns_server(
+    bridge: State<'_, Bridge>,
+    domain: String,
+    server: String,
+) -> Result<String, String> {
+    bridge
+        .proxy()
+        .await?
+        .set_dns_server(&domain, &server)
+        .await
+        .map_err(|e| friendly(&e))
+}
+
+/// Puts back the DNS setting Rabita changed (`DnsResult`).
+#[tauri::command]
+pub async fn restore_dns(bridge: State<'_, Bridge>) -> Result<String, String> {
+    bridge
+        .proxy()
+        .await?
+        .restore_dns()
+        .await
+        .map_err(|e| friendly(&e))
 }
 
 /// Closes the wizard.

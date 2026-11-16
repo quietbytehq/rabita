@@ -7,9 +7,11 @@
 import type {
   DiscoveryResult,
   DisplayManager,
+  HealthCheck,
   JobResult,
   JoinOptions,
   JoinRequest,
+  LeaveRequest,
   StepState,
 } from "./types.js";
 
@@ -18,6 +20,7 @@ export const JOIN_STEPS: ReadonlyArray<{ id: string; label: string }> = [
   { id: "detect", label: "Check this computer" },
   { id: "packages", label: "Install domain login software" },
   { id: "time", label: "Find the domain and check the clock" },
+  { id: "name", label: "Set the computer name" },
   { id: "join", label: "Join the domain" },
   { id: "sssd", label: "Set up sign-in" },
   { id: "access", label: "Choose who can sign in" },
@@ -32,8 +35,23 @@ export const POST_JOIN_STEPS: readonly string[] = ["sssd", "access", "home", "di
 /** Every step id, for a full join. */
 export const ALL_STEPS: readonly string[] = JOIN_STEPS.map((s) => s.id);
 
-export function stepLabel(id: string): string {
-  return JOIN_STEPS.find((s) => s.id === id)?.label ?? id;
+/** Leave steps in order, with the same ids and labels the helper uses. */
+export const LEAVE_STEPS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "leave", label: "Leave the domain" },
+  { id: "restore", label: "Restore the original settings" },
+  { id: "login", label: "Turn off domain sign-in rules" },
+  { id: "display", label: "Restore the login screen" },
+  { id: "dns", label: "Restore the DNS server" },
+  { id: "name", label: "Restore the computer name" },
+  { id: "finish", label: "Clean up" },
+];
+
+export const LEAVE_STEP_IDS: readonly string[] = LEAVE_STEPS.map((s) => s.id);
+
+/** Label of a join step (or a leave step when `leave` is true). */
+export function stepLabel(id: string, leave = false): string {
+  const list = leave ? LEAVE_STEPS : JOIN_STEPS;
+  return list.find((s) => s.id === id)?.label ?? id;
 }
 
 /** What the person typed, mirrored from the form controls. */
@@ -49,6 +67,14 @@ export interface FormState {
   offlineLogin: boolean;
   accessMode: "all" | "groups";
   groupsText: string;
+  /** New computer name, when the current one is invalid for the directory. */
+  newHostname: string;
+  /** DNS server typed on "Your organization". */
+  dnsServer: string;
+  /** Leave: also remove the computer account from the directory. */
+  removeAccount: boolean;
+  leaveUser: string;
+  leavePassword: string;
 }
 
 export function emptyForm(): FormState {
@@ -64,7 +90,67 @@ export function emptyForm(): FormState {
     offlineLogin: true,
     accessMode: "all",
     groupsText: "",
+    newHostname: "",
+    dnsServer: "",
+    removeAccount: true,
+    leaveUser: "",
+    leavePassword: "",
   };
+}
+
+/** Same rules as the helper: why a computer name can't be used, or null. */
+export function hostnameProblem(name: string): string | null {
+  const n = name.trim();
+  if (n === "") return "Enter a name for this computer.";
+  if (n.length > 15) return `“${n}” is ${n.length} characters long. Use at most 15.`;
+  if (!/^[A-Za-z0-9-]+$/.test(n)) return "Use only letters, numbers and hyphens.";
+  if (n.startsWith("-") || n.endsWith("-")) return "The name can't start or end with a hyphen.";
+  if (/^[0-9]+$/.test(n)) return "The name can't be only numbers.";
+  return null;
+}
+
+/** Why `text` is not a usable DNS server address, or null. */
+export function ipProblem(text: string): string | null {
+  const t = text.trim();
+  if (t === "") return "Enter the DNS server's IP address, for example 10.0.0.10.";
+  const parts = t.split(".");
+  const ipv4 =
+    parts.length === 4 && parts.every((p) => /^[0-9]{1,3}$/.test(p) && Number(p) <= 255);
+  const ipv6 = t.includes(":") && /^[0-9A-Fa-f:]+$/.test(t);
+  return ipv4 || ipv6 ? null : `“${t}” is not an IP address. It should look like 10.0.0.10.`;
+}
+
+/** Leave form: problem with the admin sign-in, or null when ready. */
+export function leaveProblem(form: FormState): string | null {
+  if (!form.removeAccount) return null;
+  return adminProblem({ ...form, adminUser: form.leaveUser, password: form.leavePassword });
+}
+
+export function buildLeaveRequest(form: FormState): LeaveRequest {
+  return {
+    remove_computer_account: form.removeAccount,
+    admin_user: form.removeAccount ? normaliseAdminUser(form.leaveUser) : null,
+  };
+}
+
+/** How a health check is shown. */
+export function checkTone(c: HealthCheck): "ok" | "warn" | "error" | "none" {
+  if (c.ok === null) return "none";
+  if (!c.ok) return "error";
+  return c.warning ? "warn" : "ok";
+}
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "2026-11-13T09:00:00Z" -> "13 November 2026" (UTC, no locale surprises). */
+export function formatDate(iso: string | null): string {
+  if (iso === null) return "Not known";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()] ?? ""} ${d.getUTCFullYear()}`;
 }
 
 /** Same rules as the helper's `normalise_domain`. */
@@ -149,14 +235,18 @@ function optional(s: string): string | null {
   return t === "" ? null : t;
 }
 
-/** The `Join` request body. The password is deliberately not part of it. */
-export function buildJoinRequest(form: FormState): JoinRequest {
+/**
+ * The `Join` request body. The password is deliberately not part of it.
+ * `rename` is true when the computer's current name can't be used.
+ */
+export function buildJoinRequest(form: FormState, rename = false): JoinRequest {
   return {
     domain: normaliseDomain(form.domain),
     admin_user: normaliseAdminUser(form.adminUser),
     computer_ou: optional(form.computerOu),
     computer_name: optional(form.computerName),
     verify_user: optional(form.verifyUser),
+    new_hostname: rename ? optional(form.newHostname) : null,
     options: buildOptions(form),
   };
 }
@@ -192,6 +282,8 @@ export interface DiscoveryView {
   headline: string;
   lines: string[];
   canContinue: boolean;
+  /** Nothing found in DNS: offer to set the organization's DNS server. */
+  dnsFixable: boolean;
 }
 
 /** Turns a discovery result into a few plain sentences. */
@@ -203,6 +295,7 @@ export function describeDiscovery(r: DiscoveryResult): DiscoveryView {
       headline: r.problem ?? `No domain controllers for ${r.domain} answered.`,
       lines: [],
       canContinue: false,
+      dnsFixable: !r.found,
     };
   }
   const reachable = r.controllers.filter((c) => c.reachable).length;
@@ -227,6 +320,7 @@ export function describeDiscovery(r: DiscoveryResult): DiscoveryView {
     headline: `Found ${r.domain}.`,
     lines,
     canContinue: true,
+    dnsFixable: false,
   };
 }
 
@@ -239,7 +333,18 @@ function describeSeconds(s: number): string {
   return `${Math.round(s / 60)} minutes`;
 }
 
-export type ScreenId = "welcome" | "organization" | "admin" | "options" | "setup" | "finish";
+export type ScreenId =
+  | "welcome"
+  | "organization"
+  | "admin"
+  | "options"
+  | "setup"
+  | "finish"
+  // Managing a joined computer:
+  | "status"
+  | "leave"
+  | "leaving"
+  | "left";
 
 export interface FinishView {
   tone: Tone;
@@ -276,7 +381,7 @@ export function finishView(result: JobResult, domain: string): FinishView {
       title: "Almost done",
       body: `This computer has joined ${domain}, but setup is not finished. Until it is, signing in with a work account may not work properly.`,
       problem: failed?.message ?? result.summary,
-      remaining: result.remaining_steps.map(stepLabel),
+      remaining: result.remaining_steps.map((id) => stepLabel(id)),
       canFinishSetup: true,
       backTo: null,
     };
@@ -296,5 +401,42 @@ export function finishView(result: JobResult, domain: string): FinishView {
     remaining: [],
     canFinishSetup: false,
     backTo,
+  };
+}
+
+export interface LeaveView {
+  tone: Tone;
+  title: string;
+  body: string;
+  /** Where ‹ Back should go to fix the problem (wrong admin password). */
+  backTo: ScreenId | null;
+  /** Some settings were not put back: offer to try again. */
+  canRetry: boolean;
+}
+
+/** What the screen after Leave (or Undo) says. */
+export function leaveView(result: JobResult, domain: string, undo: boolean): LeaveView {
+  if (result.ok && undo) {
+    return { tone: "ok", title: "Changes undone", body: result.summary, backTo: null, canRetry: false };
+  }
+  if (result.ok && result.left_locally_only) {
+    return { tone: "warn", title: "Left on this computer only", body: result.summary, backTo: null, canRetry: false };
+  }
+  if (result.ok) {
+    return { tone: "ok", title: `This computer has left ${domain}`, body: result.summary, backTo: null, canRetry: false };
+  }
+  const s = result.summary.toLowerCase();
+  if (s.includes("password") || s.includes("not allowed to remove") || s.includes("it admin account")) {
+    return { tone: "error", title: `This computer has not left ${domain}`, body: result.summary, backTo: "leave", canRetry: false };
+  }
+  if (s.includes("could not be put back")) {
+    return { tone: "warn", title: "Not everything was put back", body: result.summary, backTo: null, canRetry: true };
+  }
+  return {
+    tone: "error",
+    title: undo ? "The changes were not undone" : `This computer has not left ${domain}`,
+    body: result.summary,
+    backTo: undo ? null : "leave",
+    canRetry: undo,
   };
 }

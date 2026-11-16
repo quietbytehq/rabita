@@ -7,9 +7,12 @@
 
 import type {
   DiscoveryResult,
+  DnsResult,
+  DnsSearch,
   JobResult,
   JoinOptions,
   JoinRequest,
+  LeaveRequest,
   StatusReport,
   StepState,
   SystemInfo,
@@ -72,6 +75,26 @@ export function applyOptions(options: JoinOptions): Promise<number> {
   return call<number>("apply_options", { options: JSON.stringify(options) });
 }
 
+/** Leaves the domain, or undoes an unfinished join; returns the job id. */
+export function leave(request: LeaveRequest, password: string): Promise<number> {
+  return call<number>("leave", { request: JSON.stringify(request), password });
+}
+
+/** Looks on this network for DNS servers that know the domain. */
+export function findDnsServers(domain: string): Promise<DnsSearch> {
+  return callJson<DnsSearch>("find_dns_servers", { domain });
+}
+
+/** Makes `server` this computer's DNS server (asks for an admin password). */
+export function setDnsServer(domain: string, server: string): Promise<DnsResult> {
+  return callJson<DnsResult>("set_dns_server", { domain, server });
+}
+
+/** Puts back the DNS setting Rabita changed. */
+export function restoreDns(): Promise<DnsResult> {
+  return callJson<DnsResult>("restore_dns");
+}
+
 export function quit(): Promise<void> {
   return call<void>("quit");
 }
@@ -121,6 +144,7 @@ export function onFinished(cb: (e: FinishedEvent) => void): Promise<() => void> 
         steps: [],
         joined_not_finished: false,
         remaining_steps: [],
+        left_locally_only: false,
       };
     }
     cb({ job: p.job, ok: p.ok, result });

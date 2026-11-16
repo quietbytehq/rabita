@@ -18,7 +18,9 @@
     </p>
     <p>
       It installs and configures the standard tools for you, checks every
-      step, and backs up each file it changes.
+      step, and backs up each file it changes. Everything happens in the
+      window: no terminal is needed. Open it again later to see the
+      connection's health, or to leave the domain and put every setting back.
     </p>
   </description>
   <launchable type="desktop-id">org.quietbyte.Rabita.desktop</launchable>

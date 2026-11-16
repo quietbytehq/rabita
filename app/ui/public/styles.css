@@ -310,6 +310,14 @@ p {
   color: var(--muted);
 }
 
+#dns-card .row {
+  margin-top: 4px;
+}
+
+#dns-card .hint-error {
+  color: var(--error);
+}
+
 ul.plain,
 ol.plain {
   margin: 0;
@@ -792,6 +800,193 @@ summary:focus-visible,
   stroke: var(--error);
 }
 
+/* ------------------------------------------------- rename, DNS, status */
+
+.hint-error {
+  color: var(--error);
+}
+
+.field.tight {
+  margin: 10px 0 0;
+}
+
+.below {
+  margin: 8px 0 0;
+}
+
+.small {
+  font-size: 12.5px;
+}
+
+.candidates {
+  list-style: none;
+  align-items: center;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.candidates li.candidates-label {
+  border: 0;
+  padding: 0;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.candidates li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 2px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.candidates .btn-small {
+  padding: 3px 10px;
+}
+
+.section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.spin.small {
+  width: 12px;
+  height: 12px;
+}
+
+/* The Status screen fills the window; the checks list scrolls inside it
+   if a system reports more checks than fit. */
+.screen.status-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.status-screen .facts {
+  margin-bottom: 12px;
+}
+
+.checks {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--border);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  overflow: hidden auto;
+  min-height: 0;
+  flex: 0 1 auto;
+}
+
+.checks li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 7px 11px;
+  background: var(--bg-panel);
+  min-width: 0;
+}
+
+.checks li > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.check-label {
+  font-weight: 600;
+}
+
+.check-detail {
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.check-error .check-detail {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.check-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  position: relative;
+}
+
+.check-ok .check-icon {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.check-ok .check-icon::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 0.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-text);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.check-warn .check-icon {
+  border-color: var(--accent);
+}
+
+.check-warn .check-icon::after {
+  content: "!";
+  position: absolute;
+  inset: -2px 0 0;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  color: var(--accent);
+}
+
+.check-error .check-icon {
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+.check-error .check-icon::after {
+  content: "×";
+  position: absolute;
+  inset: -2px 0 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 15px;
+  color: var(--error);
+}
+
+.check-error .check-label {
+  color: var(--error);
+}
+
+.result-icon.warn circle {
+  fill: var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- dialog */
 
 dialog {
@@ -800,7 +995,7 @@ dialog {
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 22px 24px 18px;
-  width: 360px;
+  width: 420px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
@@ -819,6 +1014,7 @@ dialog p:not(.dialog-title) {
 
 .dialog-buttons {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;

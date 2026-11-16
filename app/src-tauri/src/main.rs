@@ -24,6 +24,10 @@ fn main() {
             bridge::status,
             bridge::join,
             bridge::apply_options,
+            bridge::leave,
+            bridge::find_dns_servers,
+            bridge::set_dns_server,
+            bridge::restore_dns,
             bridge::quit,
         ])
         .run(tauri::generate_context!());
