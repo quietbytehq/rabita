@@ -61,6 +61,20 @@ pub struct State {
     pub setup_finished: Option<bool>,
     /// Ids of the steps still to run when setup is not finished.
     pub remaining_steps: Vec<String>,
+    /// The host name before Rabita renamed the computer, if it did.
+    pub original_hostname: Option<String>,
+    /// The DNS server change Rabita made, if any.
+    pub dns_change: Option<crate::types::DnsChange>,
+}
+
+impl State {
+    /// Rabita changed settings for a join that is not in place (it failed,
+    /// was cancelled, or the computer left but something could not be put
+    /// back). Leave puts them back.
+    #[must_use]
+    pub fn restore_pending(&self) -> bool {
+        !self.joined && (self.dns_change.is_some() || self.original_hostname.is_some())
+    }
 }
 
 /// Errors from the store.

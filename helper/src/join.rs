@@ -7,16 +7,18 @@
 //! 1. detect   — is this computer supported?
 //! 2. packages — install realmd, sssd, adcli and friends
 //! 3. time     — find the domain controllers and check the clock
-//! 4. join     — `realm join` through the recommended domain controller,
+//! 4. name     — rename the computer when its name is too long or invalid
+//!    for the directory (backed up; Leave puts the old name back)
+//! 5. join     — `realm join` through the recommended domain controller,
 //!    with the admin password on stdin
-//! 5. sssd     — plain usernames, offline login, `/home/<user>`, preferred
+//! 6. sssd     — plain usernames, offline login, `/home/<user>`, preferred
 //!    DC; checked with `sssctl config-check` before restarting
-//! 6. access   — who may sign in (everyone, or only listed groups)
-//! 7. home     — create home folders on first login
-//! 8. display  — username box on the login screen
-//! 9. verify   — Kerberos ticket from the machine keytab, user lookup
+//! 7. access   — who may sign in (everyone, or only listed groups)
+//! 8. home     — create home folders on first login
+//! 9. display  — username box on the login screen
+//! 10. verify  — Kerberos ticket from the machine keytab, user lookup
 //!
-//! Steps 5-9 run after the computer account exists. If one fails, the
+//! Steps 6-10 run after the computer account exists. If one fails, the
 //! computer is "joined but not finished": the state file lists the steps
 //! still to run and `ApplyOptions` (Finish setup) completes them.
 
@@ -29,6 +31,7 @@ use zeroize::Zeroizing;
 use crate::backup::{State, Store};
 use crate::cmd::{CommandOutput, CommandSpec, Runner};
 use crate::discover::{self, Network};
+use crate::hostname;
 use crate::ini::IniDocument;
 use crate::paths::Paths;
 use crate::progress::{ProgressSink, Reporter};
@@ -398,10 +401,11 @@ impl<'a> Steps<'a> {
     }
 }
 
-const JOIN_STEPS: [(&str, &str); 9] = [
+const JOIN_STEPS: [(&str, &str); 10] = [
     ("detect", "Check this computer"),
     ("packages", "Install domain login software"),
     ("time", "Find the domain and check the clock"),
+    ("name", "Set the computer name"),
     ("join", "Join the domain"),
     ("sssd", "Set up sign-in"),
     ("access", "Choose who can sign in"),
@@ -429,7 +433,7 @@ pub fn step_label(id: &str) -> &'static str {
 pub fn not_finished_summary(domain: &str, problem: &str, remaining: &[String]) -> String {
     let labels: Vec<&str> = remaining.iter().map(|id| step_label(id)).collect();
     format!(
-        "This computer is joined to {domain} but not finished. {}. Until setup is finished, domain sign-in may not work properly (for example, home folders may not be created). Fix the problem, then run Finish setup (rabitactl finish) to complete the remaining steps: {}.",
+        "This computer is joined to {domain} but not finished. {}. Until setup is finished, domain sign-in may not work properly (for example, home folders may not be created). Fix the problem, then choose Finish setup in Rabita Setup to complete the remaining steps: {}.",
         problem.trim().trim_end_matches('.'),
         labels.join(", ")
     )
@@ -741,6 +745,12 @@ fn verify_step(ctx: &JobContext<'_>, r: &Reporter<'_>, pj: &PostJoin<'_>) -> Ste
 
 /// Records that `realm join` added this computer to the domain.
 fn mark_joined(state: &mut State, req: &JoinRequest, hostname: &str) {
+    let renamed = req
+        .new_hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let hostname = renamed.unwrap_or(hostname);
     state.joined = true;
     state.joined_at = Some(
         std::time::SystemTime::now()
@@ -791,6 +801,7 @@ pub fn run_join(ctx: &JobContext<'_>, req: &JoinRequest, password: Zeroizing<Str
         } else {
             Vec::new()
         },
+        left_locally_only: false,
     }
 }
 
@@ -823,6 +834,18 @@ fn join_inner(
             Err::<(StepState, String, ()), _>(e)
         })?;
     }
+    let new_name = req
+        .new_hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if let Some(problem) = new_name.and_then(hostname::name_problem) {
+        steps.run("detect", JOIN_STEPS[0].1, |_| {
+            Err::<(StepState, String, ()), _>(StepError(format!(
+                "The new computer name can't be used. {problem}"
+            )))
+        })?;
+    }
 
     // 1. detect
     let (info, backend) = steps.run("detect", JOIN_STEPS[0].1, |r| {
@@ -839,7 +862,7 @@ fn join_inner(
         let prior = store.load().unwrap_or_default();
         if prior.joined && prior.setup_finished == Some(false) {
             return Err(StepError(format!(
-                "This computer is already joined to {} but not finished. Run Finish setup (rabitactl finish) to complete it, or Leave domain to start again.",
+                "This computer is already joined to {} but not finished. Open Rabita Setup and choose Finish setup to complete it, or Leave domain to start again.",
                 prior.domain.unwrap_or_default()
             )));
         }
@@ -847,6 +870,13 @@ fn join_inner(
             return Err(StepError(format!(
                 "This computer is already connected to {d}. Use 'Leave domain' first."
             )));
+        }
+        if new_name.is_none() {
+            if let Some(problem) = &info.hostname_problem {
+                return Err(StepError(format!(
+                    "This computer needs a new name before it can join. {problem}"
+                )));
+            }
         }
         let family = info.family.ok_or("Unsupported system")?;
         let backend: Box<dyn Backend> = family.backend();
@@ -859,15 +889,28 @@ fn join_inner(
 
     let mut options = req.options.clone();
     options.login_access = options.login_access.normalised();
+    // Keep what an earlier, unfinished attempt recorded (backups of the
+    // original files, the DNS change, the old computer name) so Leave can
+    // still put the originals back.
+    let prior = store.load().unwrap_or_default();
+    let first_attempt = prior.backups.is_empty() && !prior.restore_pending();
+    let mkhomedir_before = prior.mkhomedir_was_enabled;
     let mut state = State {
         domain: Some(domain.clone()),
         realm: Some(realm.clone()),
         options,
         verify_user: req.verify_user.clone(),
-        ..State::default()
+        joined: false,
+        joined_at: None,
+        setup_finished: None,
+        remaining_steps: Vec::new(),
+        ..prior
     };
-    let facts_before = system::gather_facts(ctx.paths);
-    state.mkhomedir_was_enabled = facts_before.mkhomedir_already_enabled;
+    state.mkhomedir_was_enabled = if first_attempt {
+        system::gather_facts(ctx.paths).mkhomedir_already_enabled
+    } else {
+        mkhomedir_before
+    };
     store
         .save(&state)
         .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
@@ -992,8 +1035,54 @@ fn join_inner(
     })?;
     state.domain_controller = dc;
 
+    // 3a. computer name
+    steps.run("name", JOIN_STEPS[3].1, |r| {
+        let current = hostname::short_name(&info.hostname).to_owned();
+        let Some(wanted) = new_name.filter(|n| !n.eq_ignore_ascii_case(&current)) else {
+            return Ok((StepState::Skipped, format!("“{current}” is fine."), ()));
+        };
+        for p in ["/etc/hostname", "/etc/hosts"] {
+            store
+                .ensure_backup(&mut state, Path::new(p))
+                .map_err(|e| StepError(format!("Could not back up {p}: {e}")))?;
+        }
+        if state.original_hostname.is_none() {
+            state.original_hostname = Some(info.hostname.clone());
+        }
+        store
+            .save(&state)
+            .map_err(|e| StepError(format!("Could not save Rabita's state: {e}")))?;
+        execute_actions(
+            ctx,
+            &store,
+            &mut state,
+            r,
+            &[Action::run(
+                "Rename this computer",
+                "hostnamectl",
+                &["set-hostname", wanted],
+            )],
+            Duration::from_secs(60),
+        )?;
+        let hosts =
+            std::fs::read_to_string(ctx.paths.resolve(Path::new("/etc/hosts"))).unwrap_or_default();
+        store
+            .write_file(
+                &mut state,
+                Path::new("/etc/hosts"),
+                &hostname::update_hosts(&hosts, &current, wanted),
+                0o644,
+            )
+            .map_err(|e| StepError(format!("Could not update /etc/hosts: {e}")))?;
+        Ok((
+            StepState::Done,
+            format!("Renamed this computer from “{current}” to “{wanted}”."),
+            (),
+        ))
+    })?;
+
     // 4. join, through the recommended domain controller when there is one
-    steps.run("join", JOIN_STEPS[3].1, |r| {
+    steps.run("join", JOIN_STEPS[4].1, |r| {
         for p in [
             "/etc/sssd/sssd.conf",
             "/etc/krb5.conf",
@@ -1220,6 +1309,7 @@ KVNO Principal
             computer_ou: Some("OU=Linux PCs,DC=lab,DC=quietbyte,DC=test".into()),
             computer_name: None,
             verify_user: Some("amna".into()),
+            new_hostname: None,
             options: JoinOptions::default(),
         }
     }
@@ -1328,14 +1418,19 @@ KVNO Principal
         let ids: Vec<&str> = result.steps.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["detect", "packages", "time", "join", "sssd", "access", "home", "display", "verify"]
+            [
+                "detect", "packages", "time", "name", "join", "sssd", "access", "home", "display",
+                "verify"
+            ]
         );
         assert_eq!(result.steps[1].state, StepState::Skipped); // packages present
-        assert_eq!(result.steps[5].state, StepState::Done);
-        assert_eq!(result.steps[5].message, "All domain users");
+        assert_eq!(result.steps[3].state, StepState::Skipped); // name is fine
+        assert_eq!(result.steps[6].state, StepState::Done);
+        assert_eq!(result.steps[6].message, "All domain users");
         assert!(lines.contains(&"realm permit --all".to_owned()));
-        assert_eq!(result.steps[7].state, StepState::Skipped); // no DM
-        assert_eq!(result.steps[8].state, StepState::Done);
+        assert!(!lines.iter().any(|l| l.starts_with("hostnamectl")));
+        assert_eq!(result.steps[8].state, StepState::Skipped); // no DM
+        assert_eq!(result.steps[9].state, StepState::Done);
     }
 
     #[test]
@@ -1846,7 +1941,7 @@ KVNO Principal
             "This computer is joined to lab.quietbyte.test but not finished. The new sign-in settings in /etc/sssd/sssd.conf have errors, so the sign-in service was not restarted: [rule/allowed_domain_options]: Attribute 'ad_servr'"
         ), "{}", result.summary);
         assert!(result.summary.ends_with(
-            "run Finish setup (rabitactl finish) to complete the remaining steps: Set up sign-in, Choose who can sign in, Create home folders on first login, Show a username box on the login screen, Check that it works."
+            "choose Finish setup in Rabita Setup to complete the remaining steps: Set up sign-in, Choose who can sign in, Create home folders on first login, Show a username box on the login screen, Check that it works."
         ), "{}", result.summary);
         let lines = fake.call_lines();
         assert!(
@@ -2010,7 +2105,7 @@ KVNO Principal
         assert!(!result.ok);
         assert_eq!(
             result.summary,
-            "This computer is already joined to lab.quietbyte.test but not finished. Run Finish setup (rabitactl finish) to complete it, or Leave domain to start again."
+            "This computer is already joined to lab.quietbyte.test but not finished. Open Rabita Setup and choose Finish setup to complete it, or Leave domain to start again."
         );
         assert_eq!(realm_join_calls(&fake).len(), 0);
     }
@@ -2045,5 +2140,107 @@ KVNO Principal
         assert!(
             matches!(&actions[0], Action::WriteFile { path, content, .. } if path == Path::new("/etc/systemd/timesyncd.conf.d/90-rabita.conf") && content.contains("NTP=dc1.lab.test"))
         );
+    }
+
+    fn long_named_lab(dir: &Path) -> Paths {
+        let paths = lab(dir);
+        fs::write(paths.hostname_file(), "lab-classroom-pc-01\n").unwrap();
+        let hosts = paths.resolve(Path::new("/etc/hosts"));
+        fs::write(
+            &hosts,
+            "127.0.0.1\tlocalhost\n127.0.1.1\tlab-classroom-pc-01\n",
+        )
+        .unwrap();
+        paths
+    }
+
+    /// GUI requirement: a name over 15 characters is fixed before joining.
+    #[test]
+    fn renames_a_too_long_computer_before_joining() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = long_named_lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "")
+            .ok("dpkg-query", "install ok installed")
+            .ok("realm join", "")
+            .ok("klist", KLIST)
+            .ok("getent", "amna:*:1001:1001::/home/amna:/bin/bash");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let mut req = request();
+        req.new_hostname = Some("lab-classroo-01".into());
+        let result = run_join(&ctx, &req, Zeroizing::new("pw".into()));
+        assert!(result.ok, "{}", result.summary);
+        let lines = fake.call_lines();
+        let rename = lines
+            .iter()
+            .position(|l| l == "hostnamectl set-hostname lab-classroo-01")
+            .expect("hostnamectl");
+        let join = lines
+            .iter()
+            .position(|l| l.starts_with("realm join"))
+            .unwrap();
+        assert!(rename < join, "renamed before joining");
+        let name = result.steps.iter().find(|s| s.id == "name").unwrap();
+        assert_eq!(
+            name.message,
+            "Renamed this computer from “lab-classroom-pc-01” to “lab-classroo-01”."
+        );
+        assert_eq!(
+            fs::read_to_string(paths.resolve(Path::new("/etc/hosts"))).unwrap(),
+            "127.0.0.1\tlocalhost\n127.0.1.1\tlab-classroo-01\n"
+        );
+        let state = Store::new(paths).load().unwrap();
+        assert_eq!(
+            state.original_hostname.as_deref(),
+            Some("lab-classroom-pc-01")
+        );
+        assert_eq!(state.computer_name.as_deref(), Some("LAB-CLASSROO-01"));
+        for p in ["/etc/hostname", "/etc/hosts"] {
+            assert!(
+                state
+                    .backups
+                    .iter()
+                    .any(|b| b.original == Path::new(p) && b.existed),
+                "{p} backed up"
+            );
+        }
+    }
+
+    #[test]
+    fn a_too_long_name_without_a_new_one_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = long_named_lab(dir.path());
+        let fake = FakeRunner::new();
+        fake.ok("realm list", "");
+        let collector = Collector::new();
+        let ctx = JobContext {
+            runner: &fake,
+            paths: &paths,
+            sink: &collector,
+            network: None,
+        };
+        let result = run_join(&ctx, &request(), Zeroizing::new("pw".into()));
+        assert!(!result.ok);
+        assert!(
+            result
+                .summary
+                .starts_with("This computer needs a new name before it can join."),
+            "{}",
+            result.summary
+        );
+        assert_eq!(fake.call_lines(), ["realm list"], "nothing changed");
+
+        let mut req = request();
+        req.new_hostname = Some("bad_name".into());
+        let result = run_join(&ctx, &req, Zeroizing::new("pw".into()));
+        assert!(result
+            .summary
+            .starts_with("The new computer name can't be used."));
     }
 }

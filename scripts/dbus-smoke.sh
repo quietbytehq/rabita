@@ -51,6 +51,21 @@ set -e
 [ "$rc" -ne 0 ] || fail "join was not refused"
 grep -Eq 'AuthFailed|AccessDenied' <<<"$out" || fail "join refusal: $out"
 
+# Every other privileged method is refused the same way, and none leaves the helper busy.
+for cmd in "set-dns lab.example.test 10.0.0.10" "restore-dns" "leave"; do
+  set +e
+  # shellcheck disable=SC2086
+  out="$("$BIN/rabitactl" --session $cmd 2>&1)"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$cmd was not refused"
+  grep -Eq 'AuthFailed|AccessDenied' <<<"$out" || fail "$cmd refusal: $out"
+done
+
+# Looking for DNS servers needs no password and answers even without NetworkManager.
+out="$("$BIN/rabitactl" --session --json find-dns lab.example.test)"
+grep -q '"candidates"' <<<"$out" || fail "find-dns: $out"
+
 busy="$(busctl --address="$ADDR" get-property org.quietbyte.Rabita1 /org/quietbyte/Rabita1 org.quietbyte.Rabita1 Busy)"
 [ "$busy" = "b false" ] || fail "helper busy after refused join: $busy"
 

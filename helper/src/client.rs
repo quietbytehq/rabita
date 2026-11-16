@@ -28,6 +28,12 @@ pub trait Rabita {
     fn leave(&self, request: &str, password: &str) -> zbus::Result<u32>;
     /// See `RabitaService::apply_options`.
     fn apply_options(&self, options: &str) -> zbus::Result<u32>;
+    /// See `RabitaService::find_dns_servers`.
+    fn find_dns_servers(&self, domain: &str) -> zbus::Result<String>;
+    /// See `RabitaService::set_dns_server`.
+    fn set_dns_server(&self, domain: &str, server: &str) -> zbus::Result<String>;
+    /// See `RabitaService::restore_dns`.
+    fn restore_dns(&self) -> zbus::Result<String>;
     /// Helper version.
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;

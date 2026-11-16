@@ -166,13 +166,15 @@ pub fn detect(runner: &dyn Runner, paths: &Paths) -> SystemInfo {
         })
         .unwrap_or_else(|| "localhost".to_owned());
 
-    let store = Store::new(paths.clone());
-    let joined_domain = store
-        .load()
-        .ok()
+    let state = Store::new(paths.clone()).load().unwrap_or_default();
+    let joined_domain = Some(&state)
         .filter(|s| s.joined)
-        .and_then(|s| s.domain)
+        .and_then(|s| s.domain.clone())
         .or_else(|| joined_realm(runner).and_then(|r| r.domain_name.or(Some(r.name))));
+    let hostname_problem = crate::hostname::name_problem(crate::hostname::short_name(&hostname));
+    let suggested_hostname = hostname_problem
+        .as_ref()
+        .map(|_| crate::hostname::suggest_name(&hostname));
 
     SystemInfo {
         distro_id: id,
@@ -186,6 +188,10 @@ pub fn detect(runner: &dyn Runner, paths: &Paths) -> SystemInfo {
         joined_domain,
         realmd_installed: runner.which("realm"),
         sssd_installed: runner.which("sssd"),
+        hostname_problem,
+        suggested_hostname,
+        restore_pending: state.restore_pending(),
+        dns_change: state.dns_change.clone(),
     }
 }
 

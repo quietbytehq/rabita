@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Result of `DetectSystem`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // a plain JSON record of yes/no facts
 pub struct SystemInfo {
     /// `ID` from `/etc/os-release` (e.g. `ubuntu`).
     pub distro_id: String,
@@ -34,6 +35,72 @@ pub struct SystemInfo {
     pub realmd_installed: bool,
     /// Whether `sssd` is installed.
     pub sssd_installed: bool,
+    /// Why this computer's name can't be used in the directory (too long,
+    /// bad characters), or `None` when it is fine.
+    #[serde(default)]
+    pub hostname_problem: Option<String>,
+    /// A valid name to offer when `hostname_problem` is set.
+    #[serde(default)]
+    pub suggested_hostname: Option<String>,
+    /// Rabita changed settings (DNS server, computer name) for a join that
+    /// never completed; Leave puts them back.
+    #[serde(default)]
+    pub restore_pending: bool,
+    /// The DNS change Rabita made, if any.
+    #[serde(default)]
+    pub dns_change: Option<DnsChange>,
+}
+
+/// A DNS server change Rabita made through `NetworkManager`, with the
+/// original values so Leave (or Undo) can put them back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsChange {
+    /// `NetworkManager` connection id (UUID).
+    pub connection_uuid: String,
+    /// Connection name shown to people, e.g. "Wired connection 1".
+    pub connection_name: String,
+    /// Network device, e.g. `enp1s0`.
+    pub device: String,
+    /// DNS server Rabita set.
+    pub server: String,
+    /// Domain it was set for.
+    pub domain: String,
+    /// Original `ipv4.dns` (comma-separated, may be empty).
+    pub original_dns: String,
+    /// Original `ipv4.dns-search`.
+    pub original_dns_search: String,
+    /// Original `ipv4.ignore-auto-dns` (`yes`/`no`).
+    pub original_ignore_auto_dns: String,
+    /// Original `ipv6.ignore-auto-dns` (`yes`/`no`).
+    pub original_ipv6_ignore_auto_dns: String,
+}
+
+/// Result of `FindDnsServers`: DNS servers on this network that know the
+/// domain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsSearch {
+    /// The active network connection, when `NetworkManager` manages one.
+    pub connection_name: Option<String>,
+    /// Its device.
+    pub device: Option<String>,
+    /// Addresses of DNS servers that answered for the domain, best first.
+    pub candidates: Vec<String>,
+    /// How many addresses were asked.
+    pub scanned: usize,
+    /// Plain-language problem, if the search could not run.
+    pub problem: Option<String>,
+}
+
+/// Result of `SetDnsServer` and `RestoreDns`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsResult {
+    /// Whether the change was made.
+    pub ok: bool,
+    /// Plain-language outcome.
+    pub message: String,
 }
 
 /// One domain controller found by `DiscoverDomain`.
@@ -191,6 +258,10 @@ pub struct JoinRequest {
     /// Domain user to look up at the end to prove it worked.
     #[serde(default)]
     pub verify_user: Option<String>,
+    /// New host name to set before joining (when the current one is too
+    /// long or otherwise invalid for the directory).
+    #[serde(default)]
+    pub new_hostname: Option<String>,
     /// Wizard options.
     #[serde(default)]
     pub options: JoinOptions,
@@ -266,6 +337,10 @@ pub struct JobResult {
     /// Ids of the steps still to run when `joined_not_finished`.
     #[serde(default)]
     pub remaining_steps: Vec<String>,
+    /// Leave only: the computer left on its own side but its account is
+    /// still in the directory (could not reach it, or not asked to remove).
+    #[serde(default)]
+    pub left_locally_only: bool,
 }
 
 /// One health check in `Status`.
@@ -378,6 +453,7 @@ mod tests {
     #[test]
     fn job_result_round_trips() {
         let result = JobResult {
+            left_locally_only: false,
             joined_not_finished: false,
             remaining_steps: Vec::new(),
             ok: true,

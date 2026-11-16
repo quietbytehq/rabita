@@ -74,6 +74,39 @@ impl RabitaService {
         serde_json::to_string(value).map_err(|e| fdo::Error::Failed(format!("serialisation: {e}")))
     }
 
+    /// Runs a short privileged change (DNS) with the job lock held, so it
+    /// can't overlap a join or leave.
+    async fn exclusive<T, F>(&self, work: F) -> fdo::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&JobContext<'_>) -> T + Send + 'static,
+    {
+        if self
+            .inner
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(fdo::Error::Failed(
+                "Another setup job is still running. Wait for it to finish.".into(),
+            ));
+        }
+        let inner = Arc::clone(&self.inner);
+        let result = tokio::task::spawn_blocking(move || {
+            let sink = crate::progress::Collector::new();
+            let ctx = JobContext {
+                runner: inner.runner.as_ref(),
+                paths: &inner.paths,
+                sink: &sink,
+                network: Some(&crate::discover::LiveNetwork),
+            };
+            work(&ctx)
+        })
+        .await;
+        self.inner.busy.store(false, Ordering::SeqCst);
+        result.map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
     fn from_json<T: serde::de::DeserializeOwned>(json: &str) -> fdo::Result<T> {
         serde_json::from_str(json).map_err(|e| fdo::Error::InvalidArgs(format!("bad request: {e}")))
     }
@@ -231,6 +264,55 @@ impl RabitaService {
         self.start_job(conn, move |ctx| apply_options_job(ctx, &opts))
     }
 
+    /// Looks on the local network for DNS servers that know `domain` (JSON
+    /// `DnsSearch`). Changes nothing; no authorisation needed.
+    async fn find_dns_servers(&self, domain: String) -> fdo::Result<String> {
+        let inner = Arc::clone(&self.inner);
+        let result = tokio::task::spawn_blocking(move || {
+            let sink = crate::progress::Collector::new();
+            let ctx = JobContext {
+                runner: inner.runner.as_ref(),
+                paths: &inner.paths,
+                sink: &sink,
+                network: Some(&crate::discover::LiveNetwork),
+            };
+            crate::netconf::find_dns_servers(&ctx, &domain)
+        })
+        .await
+        .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        Self::to_json(&result)
+    }
+
+    /// Makes `server` this computer's DNS server on the active connection
+    /// (JSON `DnsResult`), after checking it knows `domain`. The original
+    /// setting is saved for Leave and `RestoreDns`. Requires polkit
+    /// authorisation.
+    async fn set_dns_server(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+        domain: String,
+        server: String,
+    ) -> fdo::Result<String> {
+        polkit::require_manage(conn, self.inner.bus, &header).await?;
+        let result = self
+            .exclusive(move |ctx| crate::netconf::set_dns_server(ctx, &domain, &server))
+            .await?;
+        Self::to_json(&result)
+    }
+
+    /// Puts back the DNS setting Rabita changed (JSON `DnsResult`). Requires
+    /// polkit authorisation.
+    async fn restore_dns(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<String> {
+        polkit::require_manage(conn, self.inner.bus, &header).await?;
+        let result = self.exclusive(crate::netconf::restore_dns).await?;
+        Self::to_json(&result)
+    }
+
     /// Helper version.
     #[zbus(property)]
     #[allow(clippy::unused_self)] // zbus properties take &self
@@ -376,6 +458,7 @@ pub fn apply_options_job(ctx: &JobContext<'_>, opts: &JoinOptions) -> JobResult 
         } else {
             Vec::new()
         },
+        left_locally_only: false,
     }
 }
 

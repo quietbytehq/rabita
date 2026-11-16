@@ -71,6 +71,12 @@ pub async fn require_manage(conn: &Connection, bus: Bus, header: &Header<'_>) ->
         Err(fdo::Error::AccessDenied(
             "Authentication was cancelled.".into(),
         ))
+    } else if result.is_challenge {
+        // An administrator could have allowed it, but no password dialog
+        // (polkit authentication agent) was there to ask.
+        Err(fdo::Error::AccessDenied(
+            "No password dialog could be shown, so Rabita could not ask for permission. Open Rabita Setup from the desktop's app menu while signed in to the desktop (not from a remote session), then try again.".into(),
+        ))
     } else {
         Err(fdo::Error::AccessDenied(
             "You are not allowed to change this computer's organization connection. An administrator must authorize it.".into(),

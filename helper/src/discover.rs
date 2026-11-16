@@ -17,7 +17,7 @@
 //! disagrees with the majority are never used for time sync.
 
 use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::cmd::{CommandSpec, Runner};
@@ -38,6 +38,18 @@ pub trait Network: Send + Sync {
     fn discover(&self, domain: &str, runner: &dyn Runner, paths: &Paths) -> DiscoveryResult;
     /// Measures one domain controller's clock offset in seconds.
     fn clock_offset(&self, host: &str) -> Option<f64>;
+    /// Whether the DNS server at `server` answers the SRV query `name`.
+    fn srv_via(&self, _server: IpAddr, _name: &str) -> bool {
+        false
+    }
+    /// Which of `hosts` answer the SRV query `name` on port 53.
+    fn probe_dns(&self, _hosts: &[Ipv4Addr], _name: &str) -> Vec<Ipv4Addr> {
+        Vec::new()
+    }
+    /// Whether this computer's own resolver answers the SRV query `name`.
+    fn resolves(&self, _name: &str, _paths: &Paths) -> bool {
+        false
+    }
 }
 
 /// The real network: DNS, TCP and SNTP.
@@ -51,6 +63,18 @@ impl Network for LiveNetwork {
 
     fn clock_offset(&self, host: &str) -> Option<f64> {
         sntp::clock_offset(host, Duration::from_secs(3)).ok()
+    }
+
+    fn srv_via(&self, server: IpAddr, name: &str) -> bool {
+        dns::lookup_srv(name, &[server], Duration::from_secs(3)).is_ok()
+    }
+
+    fn probe_dns(&self, hosts: &[Ipv4Addr], name: &str) -> Vec<Ipv4Addr> {
+        crate::netconf::probe_hosts(hosts, name)
+    }
+
+    fn resolves(&self, name: &str, paths: &Paths) -> bool {
+        crate::netconf::system_resolves(name, paths)
     }
 }
 
