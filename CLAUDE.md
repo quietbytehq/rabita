@@ -32,7 +32,7 @@ rabita/
   docs/
 ```
 1. **app (wizard GUI)** — unprivileged. Talks to helper over D-Bus (`org.quietbyte.Rabita1`). After joining, reopening the app shows a Status screen (connected?, domain controller, signed-in user, health checks, Refresh, Leave domain).
-2. **helper (root)** — small and auditable. Methods: `DetectSystem`, `DiscoverDomain`, `Join`, `Leave`, `Status`, `ApplyOptions`. Each privileged method requires polkit auth (`org.quietbyte.rabita.manage`). Streams progress signals so the wizard's checklist updates live.
+2. **helper (root)** — small and auditable. Methods: `DetectSystem`, `DiscoverDomain`, `Join`, `Leave`, `Status`, `ApplyOptions`, plus `FindDnsServers`, `SetDnsServer`, `RestoreDns` for the DNS fix. Each privileged method requires polkit auth (`org.quietbyte.rabita.manage`). Streams progress signals so the wizard's checklist updates live.
 3. **agent (user session)** — runs at login. Reads the user's drive and printer assignments, mounts shares with Kerberos (`sec=krb5`), adds printers to CUPS, creates sidebar bookmarks named like `H: Home`. Quiet; optional tray icon.
 
 ## What the helper does during Join

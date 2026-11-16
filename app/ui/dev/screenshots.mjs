@@ -169,6 +169,191 @@ async function walkToOptions(page) {
   await page.close();
 }
 
+// 6. A computer name that is too long is fixed on Welcome and sent with the join.
+{
+  const page = await open("long-name");
+  await page.getByText("This computer needs a new name").waitFor();
+  assert.equal(await page.inputValue("#new-name"), "lab-classroo-01", "the suggestion is filled in");
+  await page.fill("#new-name", "lab_pc!");
+  await page.getByText("Use only letters, numbers and hyphens.").waitFor();
+  assert.ok(await disabled(page, "next"), "an invalid name blocks Next");
+  await page.fill("#new-name", "lab-pc-room12");
+  assert.ok(!(await disabled(page, "next")));
+  await shot(page, "9-rename-computer");
+  await walkToOptions(page);
+  await page.getByRole("button", { name: "Next ›" }).click();
+  await page.fill("#admin-user", "joiner");
+  await page.fill("#password", "pw");
+  await page.getByRole("button", { name: "Next ›" }).click();
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByText("All done").waitFor();
+  const sent = await page.evaluate(() => window.__RABITA_LAST_JOIN__);
+  assert.equal(sent.request.new_hostname, "lab-pc-room12");
+  assert.equal(await page.locator(".checklist li").count(), 0, "finish screen replaced the checklist");
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 7. The domain can't be found: detect a DNS server, use it, and find the domain.
+{
+  const page = await open("no-dns");
+  await page.getByText("Ubuntu 24.04.1 LTS").waitFor();
+  await page.getByRole("button", { name: "Next ›" }).click();
+  await page.fill("#domain", "lab.quietbyte.test");
+  await page.press("#domain", "Enter");
+  await page.getByText("lab.quietbyte.test was not found").waitFor();
+  assert.ok(await disabled(page, "next"));
+  await page.fill("#dns-server", "10.0.0");
+  await page.getByRole("button", { name: "Use this server" }).click();
+  await page.getByText("is not an IP address").waitFor();
+  await page.getByRole("button", { name: "Look for it on this network" }).click();
+  await page.locator(".candidates li", { hasText: "10.0.0.10" }).waitFor();
+  await shot(page, "10-dns-server");
+  const dnsOverflow = await page.evaluate(() => {
+    const c = document.getElementById("content");
+    return c.scrollHeight - c.clientHeight;
+  });
+  assert.ok(dnsOverflow <= 0, `DNS screen overflows by ${dnsOverflow}px`);
+  await page.locator(".candidates li", { hasText: "10.0.0.10" }).getByRole("button", { name: "Use" }).click();
+  await page.getByText("Found lab.quietbyte.test.").waitFor();
+  await page.getByText("now uses 10.0.0.10 as its DNS server").waitFor();
+  assert.equal(await page.evaluate(() => window.__RABITA_LAST_DNS__), "10.0.0.10");
+  assert.ok(!(await disabled(page, "next")));
+  // Cancelling now offers to put the DNS setting back.
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Undo and close" }).click();
+  await page.waitForFunction(() => window.__RABITA_QUIT__ === true);
+  assert.ok(await page.evaluate(() => window.__RABITA_DNS_RESTORED__ === true));
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+async function openStatus(scenario) {
+  const page = await open(scenario);
+  await page.getByText("Connected to lab.quietbyte.test").first().waitFor();
+  await page.getByText("Computer account key").waitFor();
+  return page;
+}
+
+async function leave(page, { remove = true, user = "admin", password = "pw" } = {}) {
+  await page.getByRole("button", { name: "Leave domain…" }).click();
+  await page.getByText("Leave lab.quietbyte.test", { exact: true }).waitFor();
+  if (remove) {
+    assert.ok(await disabled(page, "next"), "removing the account needs an admin sign-in");
+    await page.fill("#leave-user", user);
+    await page.fill("#leave-password", password);
+  } else {
+    await page.getByText("Also remove this computer from").click();
+    assert.ok(!(await page.isChecked("#remove-account")));
+    await page.getByText("The computer account stays in the directory").waitFor();
+  }
+  assert.ok(!(await disabled(page, "next")));
+}
+
+// 8. Joined: Status, then Leave domain with removal from the directory.
+{
+  const page = await openStatus("joined");
+  assert.equal(await page.locator("#steps li.active").innerText(), "Status");
+  assert.equal(await page.locator(".checks li").count(), 8);
+  await shot(page, "11-status");
+  await leave(page);
+  await shot(page, "12-leave-domain");
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByText("Leave lab.quietbyte.test?").waitFor();
+  await page.getByRole("button", { name: "Keep connected" }).click();
+  assert.ok(!(await page.locator("#dialog").isVisible()), "nothing happens without confirming");
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await page.getByText("This computer has left lab.quietbyte.test").first().waitFor();
+  await page.waitForTimeout(1100);
+  await page.screenshot({ path: join(out, "13-left-domain.png") });
+  const sent = await page.evaluate(() => window.__RABITA_LAST_LEAVE__);
+  assert.deepEqual(sent.request, { remove_computer_account: true, admin_user: "admin" });
+  assert.equal(sent.passwordLength, 2);
+  assert.equal(await page.locator("#steps li.active").innerText(), "Done");
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 9. The domain can't be reached: Rabita leaves locally and says what to delete.
+{
+  const page = await openStatus("joined-unreachable");
+  assert.ok((await page.locator(".checks li.check-error").count()) >= 1, "failed checks are marked");
+  await leave(page);
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await page.getByText("Left on this computer only").waitFor();
+  await page.getByText("Active Directory Users and Computers").waitFor();
+  await page.waitForTimeout(1100);
+  await page.screenshot({ path: join(out, "14-left-locally-only.png") });
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 10. A wrong admin password on Leave goes back with the password cleared.
+{
+  const page = await openStatus("joined-wrong-password");
+  await leave(page, { password: "bad" });
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await page.getByText("This computer has not left lab.quietbyte.test").waitFor();
+  await page.getByRole("button", { name: "‹ Back" }).click();
+  await page.locator("#leave-user").waitFor();
+  assert.equal(await page.inputValue("#leave-user"), "admin");
+  assert.equal(await page.inputValue("#leave-password"), "");
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 11. Leave on this computer only (no admin account needed).
+{
+  const page = await openStatus("joined");
+  await leave(page, { remove: false });
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await page.getByText("Left on this computer only").waitFor();
+  const sent = await page.evaluate(() => window.__RABITA_LAST_LEAVE__);
+  assert.deepEqual(sent.request, { remove_computer_account: false, admin_user: null });
+  assert.equal(sent.passwordLength, 0);
+  await page.close();
+}
+
+// 12. Settings left by an unfinished attempt can be undone from Welcome.
+{
+  const page = await open("restore-pending");
+  await page.getByText("Settings from an earlier attempt").waitFor();
+  await page.getByRole("button", { name: "Undo changes" }).click();
+  await page.getByText("Changes undone").waitFor();
+  await page.getByText("Rabita put back the settings it had changed.").waitFor();
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 13. Some settings could not be put back: offer Try again.
+{
+  const page = await openStatus("leave-problem");
+  await leave(page, { remove: false });
+  await page.getByRole("button", { name: "Leave domain", exact: true }).click();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await page.getByText("Not everything was put back").waitFor();
+  assert.ok(await page.getByRole("button", { name: "Try again" }).isVisible());
+  await page.close();
+}
+
+// 14. Every screen fits the 800×560 window without scrolling the page.
+{
+  for (const scenario of ["joined", "long-name", "joined-unfinished"]) {
+    const page = await open(scenario);
+    await page.waitForTimeout(900);
+    const overflow = await page.evaluate(() => {
+      const c = document.getElementById("content");
+      return c.scrollHeight - c.clientHeight;
+    });
+    assert.ok(overflow <= 0, `${scenario}: content overflows by ${overflow}px`);
+    await page.close();
+  }
+}
+
 await browser.close();
 server.close();
 console.log(`UI walk-through passed; screenshots in ${out}`);

@@ -392,12 +392,8 @@ on the same snapshot.
       app opens (App Center on Ubuntu 24.04+, Software Manager / GDebi on
       Mint, Software on Debian) and shows **Rabita Setup** with its logo
       and description. Choose **Install** and enter your password.
-- [ ] If the software app refuses or does nothing, note what it said, then
-      install from a terminal instead:
-
-```bash
-sudo apt install ./rabita_0.1.0~dev_amd64.deb
-```
+- [ ] If the software app refuses or does nothing, that is a bug: note
+      what it said and take a screenshot.
 
 - [ ] **Rabita Setup** appears in the app menu (search "domain" or
       "Rabita") with the two-nodes logo.
@@ -460,8 +456,8 @@ Open **Rabita Setup** from the menu.
       **Close** closes the window.
 - [ ] Sign out; on the login screen use **Not listed?**, sign in as `amna`;
       the home folder is created.
-- [ ] Reopen Rabita Setup: Welcome says *already connected to
-      lab.quietbyte.test*.
+- [ ] Reopen Rabita Setup: it opens on the **Status** screen (see the
+      GUI-only checklist below).
 
 ### 10. When things go wrong
 
@@ -470,8 +466,9 @@ On a fresh snapshot each time:
 - [ ] Wrong admin password: the Finish screen says *This computer was not
       connected* with the reason; **‹ Back** returns to IT admin sign-in with
       the password box empty.
-- [ ] Joined but not finished: install the packages first and break
-      `pam-auth-update` as in Milestone 2 step 4b, then connect. The Finish
+- [ ] Joined but not finished (*lab fault injection: the terminal is only
+      used to cause the fault, never to fix it*): install the packages first
+      and break `pam-auth-update` as in Milestone 2 step 4b, then connect. The Finish
       screen says *Almost done*, what went wrong, and what is still to do,
       with a **Finish setup** button (no ‹ Back). Put `pam-auth-update` back
       (`sudo chmod +x /usr/sbin/pam-auth-update`), press **Finish setup**:
@@ -481,21 +478,275 @@ On a fresh snapshot each time:
 
 ### 11. Remove
 
-```bash
-sudo apt remove rabita
-```
-
-- [ ] The menu entry disappears. (Leave the domain first if the computer is
-      joined; Rabita's backups stay in `/var/lib/rabita` either way.)
+- [ ] See step G7 of the GUI-only checklist below.
 
 ### Known limits in this milestone
 
-- The Status screen and **Leave domain** in the window come in Milestone 6;
-  a joined computer only shows *already connected* on Welcome, plus
-  **Finish setup** when setup is not finished. `rabitactl status` and
-  `rabitactl leave` still work.
 - The `.deb` is built on Ubuntu 22.04 for amd64. Other architectures and
   the `.rpm` / AUR packages come in Milestone 8.
 - The admin password passes through the web page and the app's memory as
   plain text for the moment it takes to send it to the helper; the Rust
   side wipes its copy straight after. It is never written to disk.
+
+## GUI only: install, join, sign in, leave (no terminal, no sudo)
+
+What this proves: a technician can do everything, from installing Rabita to
+removing the computer from the domain, with the mouse and the desktop's own
+password window. **Do not open a terminal in this section.** If any step
+seems to need one, stop: that is a bug. Take a screenshot and note it.
+
+The only exceptions are marked *lab only*: things a technician would never
+do, used to cause a fault on purpose.
+
+### Lab for this section
+
+- The DC with `lab.quietbyte.test`, the delegated `joiner` account, the test
+  user `amna`, and a domain admin account for removing computers (or give
+  `joiner` the right to delete computer objects in the Linux PCs OU).
+- **VM 1, GNOME:** Ubuntu 24.04 desktop (26.04 too if you have it), signed
+  in as a normal administrator account (the one created at install).
+- **VM 2, KDE:** Kubuntu 24.04 desktop, same as VM 1.
+- On each VM, a second **standard** (non-administrator) account, made in
+  Settings → System → Users (GNOME) or System Settings → Users (KDE).
+- Snapshot both VMs before starting, and restore the snapshot between the
+  numbered parts when it says *fresh snapshot*.
+- Have **Active Directory Users and Computers** open on the DC.
+
+### G1. Install by double-click
+
+Copy `rabita_0.1.0~dev_amd64.deb` (from the **rabita-deb** CI artifact) to
+the VM's Downloads folder, using a shared folder or a browser download.
+
+GNOME (VM 1):
+
+- [ ] In **Files**, double-click the `.deb`. **App Center** opens and shows
+      *Rabita Setup* with its two-nodes logo and description.
+- [ ] Choose **Install**. The system password window appears; enter your
+      password. App Center shows it as installed.
+- [ ] Open **Show Apps** and search *Rabita* or *domain*: **Rabita Setup**
+      is there with the logo. Open it.
+
+KDE (VM 2):
+
+- [ ] In **Dolphin**, double-click the `.deb`. **Discover** opens on
+      *Rabita Setup*. Choose **Install** and enter your password.
+- [ ] Open the application launcher and search *Rabita*: **Rabita Setup**
+      is there under *System*. Open it.
+
+Record for both: which app opened the `.deb`, how long the install took,
+and any warning it showed (for example, about a package from outside the
+store).
+
+### G2. The admin password window (GNOME and KDE)
+
+Do this on both VMs. Everything that changes the computer goes through the
+desktop's own password window; Rabita itself never asks for the computer's
+password.
+
+- [ ] On *Your organization*, enter a domain that does not exist (for
+      example `nowhere.test`) and press **Find**. The DNS box appears. Type
+      `10.0.0.10` and press **Use this server**: the **desktop's** password
+      window appears (GNOME: a dark sheet over the screen; KDE: a separate
+      *Authentication Required* window). It names *Rabita Setup* and says it
+      *needs an administrator's password to change how this computer signs
+      in to your organization*.
+- [ ] Press **Cancel** in that window. Rabita stays put and says nothing
+      was changed (or that authentication was cancelled). Nothing changed.
+- [ ] Sign out, sign in as the **standard** account, open Rabita Setup and
+      repeat: the password window asks for an **administrator's** password
+      (it may list the admin account to pick). Enter it: the action goes
+      ahead. Sign out and back in as the admin account.
+- [ ] Enter a wrong password three times: the window says it failed and
+      Rabita shows a plain message; nothing was changed.
+- [ ] After one successful password, other actions within a few minutes
+      may not ask again. That is expected (`auth_admin_keep`).
+
+### G3. Computer name too long (fresh snapshot)
+
+- [ ] Rename the computer to `lab-classroom-pc-01` (19 characters): GNOME
+      Settings → System → About → **Device Name**; KDE System Settings →
+      About this System is read-only, so on VM 2 use the Kubuntu installer's
+      name or skip this part. Restart.
+- [ ] Open Rabita Setup. Welcome shows *This computer needs a new name*,
+      says it is 19 characters long and the limit is 15, and offers
+      `lab-classroo-01` in an editable box.
+- [ ] Type `lab_pc!`: the hint turns red (*Use only letters, numbers and
+      hyphens*) and **Next** is disabled. Type `-lab`, then `2024`: each has
+      its own plain reason. Type `lab-pc-room12`: **Next** is enabled.
+- [ ] Carry on through G5 to join. The checklist shows *Set the computer
+      name* just before *Join the domain*, with *Renamed this computer
+      from “lab-classroom-pc-01” to “lab-pc-room12”*.
+- [ ] In Settings → About, the device name is now `lab-pc-room12`. In
+      Active Directory Users and Computers, the computer object is
+      **LAB-PC-ROOM12** (not a cut-off old name).
+
+### G4. Domain not found: set the DNS server (fresh snapshot)
+
+Make the VM use a DNS server that does not know the lab domain: in GNOME
+Settings → Network → the wired connection's gear → IPv4, turn **Automatic**
+off next to DNS and enter `1.1.1.1` (KDE: System Settings → Connections →
+IPv4 → Other DNS servers). Apply, then turn the network off and on.
+
+- [ ] Open Rabita Setup → **Next**. Enter `lab.quietbyte.test`, press
+      **Find**: a red box says *lab.quietbyte.test was not found*, explains
+      DNS in one sentence, and offers an IP box and *Look for it on this
+      network*.
+- [ ] Type `10.0.0` and **Use this server**: *“10.0.0” is not an IP address*
+      under the box; nothing changed and no password window.
+- [ ] Press **Look for it on this network**. Within about 10 seconds it
+      lists the DC's IP (only if the DC is on the same network as the VM, or
+      is its gateway; otherwise it says none were found, which is fine).
+- [ ] Press **Use** next to the DC's IP (or type it and press **Use this
+      server**). Enter your password in the desktop's window. Rabita says
+      *This computer now uses 10.x.x.x as its DNS server on “Wired
+      connection 1”* and immediately finds the domain. **Next** is enabled.
+- [ ] Settings → Network → the gear: DNS now shows the DC's IP with
+      Automatic off.
+- [ ] Type a wrong IP that is not a DNS server (for example the VM's own
+      gateway if it is not the DC) on a second try from a fresh snapshot:
+      Rabita says the server does not know the domain and **changes
+      nothing**.
+- [ ] Cancel path: after Rabita changed the DNS server, press **Cancel**.
+      It asks *Close Rabita Setup?* and offers **Undo and close**. Choose it:
+      the window closes and Settings → Network shows the old DNS setting
+      (`1.1.1.1`) again.
+- [ ] Leftovers path: set the DNS server again, then **Cancel** → **Keep the
+      change**. Reopen Rabita Setup: Welcome says *Settings from an earlier
+      attempt* and offers **Undo changes**. Press it, enter your password:
+      *Changes undone*, and the old DNS setting is back.
+
+### G5. Join, all steps
+
+From a fresh snapshot with working DNS, or straight after G3/G4:
+
+- [ ] Walk through the six screens: domain → `joiner` and password →
+      options (keep the defaults; type `amna` as the test user) →
+      **Connect** → the desktop's password window → the live checklist.
+- [ ] Every step ends with a tick, including *Set up sign-in*, *Choose who
+      can sign in*, *Create home folders on first login*, *Show a username
+      box on the login screen* and *Check that it works*.
+- [ ] Finish: *All done*, with three plain next steps. **Close**.
+- [ ] Partial join (*lab only*: break `pam-auth-update` as in Milestone 2
+      step 4b to cause the fault): Finish says *Almost done* and lists what
+      is still to do. Undo the fault, then press **Finish setup** in the
+      window: only the remaining steps run, then *All done*. Also try
+      closing instead, reopening Rabita Setup: Status says *setup is not
+      finished* and offers **Finish setup** there too.
+
+### G6. Sign in as a domain user
+
+- [ ] Restart. The login screen has **Not listed?** (GNOME) or a username
+      box (KDE/SDDM).
+- [ ] Sign in as `amna` with her domain password. The desktop opens; Files
+      shows a new home folder `/home/amna`.
+- [ ] Sign out. Turn the VM's network off (in Proxmox, or the network icon
+      on the login screen). Sign in as `amna` again: it still works
+      (cached).
+- [ ] Turn the network back on. Sign out, sign in as the local admin.
+
+### G7. Status
+
+- [ ] Open Rabita Setup. It opens on **Status**, not Welcome: *Connected to
+      lab.quietbyte.test*, the computer name, the domain controller, and
+      *Connected since* today's date.
+- [ ] Health checks show ticks for domain controller, setup, sign-in
+      service, who can sign in, computer account key, Kerberos sign-in and
+      clock. A stale DNS record or bad clock shows as a mango **!** with a
+      plain explanation. Hover a cut-off line to read it in full.
+- [ ] Turn the network off and press **Refresh**: the domain controller and
+      Kerberos checks turn red with a reason. Turn it back on and
+      **Refresh**: ticks again.
+- [ ] The banner shows *Status → Leave domain → Leaving → Done*.
+
+### G8. Leave, removing the computer from the domain
+
+- [ ] On Status press **Leave domain…**. The screen explains what leaving
+      does and what is put back. *Also remove this computer from
+      lab.quietbyte.test (recommended)* is ticked; **Leave domain** stays
+      disabled until an admin user name and password are entered.
+- [ ] Enter the admin account and press **Leave domain**: Rabita asks
+      *Leave lab.quietbyte.test?* first. **Keep connected** does nothing.
+      Press **Leave domain** again → **Leave** → the desktop's password
+      window → the checklist: leave, restore settings, sign-in rules, login
+      screen, DNS server, computer name, clean up.
+- [ ] *This computer has left lab.quietbyte.test*, saying the computer
+      account was removed. **Close**.
+- [ ] In Active Directory Users and Computers (press F5), the computer
+      object is **gone**.
+- [ ] Restart. The login screen is back to normal (user list, no **Not
+      listed?** if it was not there before). `amna` can no longer sign in;
+      the local admin can. Her files stay in `/home/amna`.
+- [ ] If G3 or G4 ran on this snapshot: Settings → About shows the
+      **original** name (`lab-classroom-pc-01`) and Settings → Network shows
+      the **original** DNS setting.
+- [ ] Open Rabita Setup again: it opens on Welcome, ready to connect. Join
+      once more to check nothing was left behind (then restore the snapshot).
+
+### G9. Leave when the domain can't be reached
+
+Fresh snapshot, join (G5), then make the DC unreachable: in Proxmox,
+disconnect the DC's network card (or shut the DC down).
+
+- [ ] Leave with *Also remove…* ticked and the admin account. The details
+      log says *could not reach lab.quietbyte.test… Leaving on this
+      computer only*.
+- [ ] The result says **Left on this computer only** and explains that the
+      computer account (its name) is still in the directory and the IT
+      admin must delete it in **Active Directory Users and Computers**.
+- [ ] Everything else is put back as in G8 (restart and check).
+- [ ] Reconnect the DC. In Active Directory Users and Computers, the object
+      is still there; delete it by hand as the message said.
+- [ ] Also try **unticking** *Also remove…*: the admin boxes disappear, a
+      note says the account stays in the directory, and **Leave domain**
+      works without any admin account for the domain (the desktop's password
+      window still appears).
+
+### G10. Leave with a wrong admin password
+
+- [ ] Fresh snapshot, join, then Leave with a wrong password for the
+      domain admin account. The result says *This computer has not left
+      lab.quietbyte.test* and that the username or password was not
+      accepted. **‹ Back** returns to the Leave screen with the user name
+      kept and the password box empty. The computer is still joined
+      (Status still shows it).
+- [ ] With an account that may not delete computer objects: the message
+      says that account is not allowed to remove computers, and suggests a
+      different account or leaving on this computer only.
+
+### G11. Look and feel on both desktops
+
+- [ ] Navy and mango, Manrope font, nothing cut off on any screen including
+      Status (with every check), Leave, and the DNS box with results.
+- [ ] Reduced motion: GNOME Settings → Accessibility → **Reduce
+      Animation**; KDE System Settings → General Behaviour → Animation speed
+      **Instant**. Reopen Rabita Setup: nothing moves (no pulsing, no
+      rings, no slide-in, no shimmer). Note if KDE's setting does not reach
+      the app.
+- [ ] Every screen can be used with the keyboard alone (Tab, Space, Enter,
+      Esc).
+
+### G12. Uninstall by mouse
+
+- [ ] GNOME: App Center → **Manage** (or search *Rabita*) → **Uninstall**
+      → password. KDE: Discover → **Installed** → Rabita Setup → **Remove**.
+- [ ] The menu entry disappears. Leave the domain **before** uninstalling;
+      if you forget, reinstall Rabita and use Leave domain.
+
+### Known limits of the GUI-only path
+
+- The DNS fix needs NetworkManager (the default on Ubuntu, Kubuntu, Mint,
+  Fedora and openSUSE desktops). Without it Rabita says so and changes
+  nothing; the technician then sets DNS in the system's network settings.
+- *Look for it on this network* only checks the gateway and the computer's
+  own network (up to 254 addresses, DNS port only). A DNS server on another
+  subnet must be typed in.
+- The password window is the desktop's own. If none is running (for
+  example over some remote-desktop tools), Rabita says no password window
+  could be shown and changes nothing.
+- Whether App Center or Discover accept a local `.deb` depends on their
+  version. Ubuntu 24.04's App Center installs local `.deb` files through
+  PackageKit; the CI and the developer sandbox check that PackageKit
+  installs and removes the package without questions (`pkcon
+  install-local`), but the click in App Center and Discover is only tested
+  here, in the lab.
+

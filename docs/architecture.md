@@ -49,6 +49,9 @@ Rabita is three programs in one repository. Only one of them runs as root.
 | `Leave`          | yes          | `realm leave`, restore backed-up configs           |
 | `Status`         | no           | Joined?, DC, health checks                         |
 | `ApplyOptions`   | yes          | Re-apply wizard options (who can sign in, home folders, login screen) |
+| `FindDnsServers` | no           | Look on the local network for DNS servers that know the domain |
+| `SetDnsServer`   | yes          | Point the active NetworkManager connection at the organization's DNS server (recorded for Leave) |
+| `RestoreDns`     | yes          | Put that DNS setting back                          |
 
 `Join`, `Leave` and `ApplyOptions` return a job id immediately and stream
 `Progress(job, step, state, message)`, `LogLine(job, line)` and
@@ -73,8 +76,17 @@ live and no D-Bus call waits on `apt-get`.
 
 `rabita-app` is a Tauri 2 window whose page lives in `app/ui` (TypeScript,
 HTML, CSS, bundled Manrope font). The page calls Rust commands
-(`detect_system`, `discover_domain`, `status`, `join`, `apply_options`),
-which pass the helper's JSON straight through. Before a job starts, the Rust
+(`detect_system`, `discover_domain`, `status`, `join`, `apply_options`,
+`leave`, `find_dns_servers`, `set_dns_server`, `restore_dns`), which pass the
+helper's JSON straight through.
+
+Everything a technician needs is in the window, so no terminal or `sudo` is
+ever needed: the computer name is fixed on Welcome, a missing DNS server on
+*Your organization*, and a computer that is already joined opens on a
+**Status** screen with **Refresh**, **Finish setup** (when needed) and
+**Leave domain**. Permission always comes from the desktop's own polkit
+password window, which the helper triggers; the app never sees the
+computer's admin password. Before a job starts, the Rust
 side subscribes to the helper's `Progress`, `LogLine` and `JobFinished`
 signals and forwards them to the page as events, so the checklist updates
 live. The app refuses to run as root and has a strict content-security
