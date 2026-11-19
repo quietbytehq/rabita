@@ -30,6 +30,10 @@ Root is always authorised. A refusal returns
 `org.freedesktop.DBus.Error.AccessDenied`; if polkit cannot be reached the
 helper fails closed with `org.freedesktop.DBus.Error.AuthFailed`.
 
+If the desktop's password window is left unanswered for 5 minutes, the
+helper closes it (polkit `CancelCheckAuthorization`) and refuses with
+`AccessDenied` (*Nobody answered the password window within 5 minutes…*).
+
 Only one job runs at a time; a second `Join`/`Leave` while busy returns
 `org.freedesktop.DBus.Error.Failed`.
 

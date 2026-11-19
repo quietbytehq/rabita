@@ -9,6 +9,8 @@
 //! authorised.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use zbus::message::Header;
 use zbus::names::BusName;
@@ -25,6 +27,17 @@ pub enum Bus {
     /// The session bus (development only; still checks polkit by process id).
     Session,
 }
+
+/// How long the desktop's password window may stay open unanswered. After
+/// this the helper closes it and refuses, so a forgotten dialog can't leave
+/// the wizard waiting forever (the wizard gives up a little later).
+pub const PASSWORD_WINDOW_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+/// Message when nobody answers the password window in time.
+pub const PASSWORD_WINDOW_TIMED_OUT: &str =
+    "Nobody answered the password window within 5 minutes, so nothing was changed. Try again when you are ready to enter the password.";
+
+static NEXT_CHECK: AtomicU64 = AtomicU64::new(1);
 
 /// Checks that the sender of `header` may manage the domain connection.
 ///
@@ -55,16 +68,25 @@ pub async fn require_manage(conn: &Connection, bus: Bus, header: &Header<'_>) ->
     let authority = AuthorityProxy::new(&system)
         .await
         .map_err(|e| fdo::Error::AuthFailed(format!("polkit unavailable: {e}")))?;
-    let result = authority
-        .check_authorization(
-            &subject,
-            POLKIT_ACTION,
-            &HashMap::new(),
-            CheckAuthorizationFlags::AllowUserInteraction.into(),
-            "",
-        )
-        .await
-        .map_err(|e| fdo::Error::AuthFailed(format!("polkit check failed: {e}")))?;
+    let cancel_id = format!(
+        "rabita-{}-{}",
+        std::process::id(),
+        NEXT_CHECK.fetch_add(1, Ordering::Relaxed)
+    );
+    let details = HashMap::new();
+    let check = authority.check_authorization(
+        &subject,
+        POLKIT_ACTION,
+        &details,
+        CheckAuthorizationFlags::AllowUserInteraction.into(),
+        &cancel_id,
+    );
+    let Ok(result) = tokio::time::timeout(PASSWORD_WINDOW_LIMIT, check).await else {
+        // Close the dialog; polkit then answers the pending check.
+        let _ = authority.cancel_check_authorization(&cancel_id).await;
+        return Err(fdo::Error::AccessDenied(PASSWORD_WINDOW_TIMED_OUT.into()));
+    };
+    let result = result.map_err(|e| fdo::Error::AuthFailed(format!("polkit check failed: {e}")))?;
     if result.is_authorized {
         Ok(())
     } else if result.details.contains_key("polkit.dismissed") {
