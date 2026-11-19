@@ -20,7 +20,12 @@ dbus-daemon --session --address="$ADDR" --nofork --nopidfile >/dev/null 2>&1 &
 DPID=$!
 sleep 0.5
 export DBUS_SESSION_BUS_ADDRESS="$ADDR"
-"$BIN/rabita-helper" --session 2>"$TMP/helper.log" &
+# The helper asks polkit over the system bus. Give it one that doesn't
+# exist, so every privileged call is refused (fail closed) and this test can
+# never change the computer it runs on, whoever runs it (root, or a user
+# whose admin password polkit still remembers).
+DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMP/no-system-bus" \
+  "$BIN/rabita-helper" --session 2>"$TMP/helper.log" &
 HPID=$!
 for _ in $(seq 1 20); do
   grep -q "serving org.quietbyte.Rabita1" "$TMP/helper.log" 2>/dev/null && break
