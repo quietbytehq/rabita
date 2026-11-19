@@ -7,6 +7,9 @@ Documentation=https://github.com/quietbytehq/rabita
 Type=dbus
 BusName=org.quietbyte.Rabita1
 ExecStart=/usr/libexec/rabita-helper
+# The helper claims its bus name within a second; give up quickly if it
+# doesn't, so the wizard's request fails with a reason instead of hanging.
+TimeoutStartSec=20
 # Hardening: the helper runs as root but should touch as little as possible.
 ProtectHome=yes
 PrivateTmp=yes

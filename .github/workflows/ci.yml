@@ -117,7 +117,15 @@ jobs:
           packaging/deb/build-deb.sh
       - name: Install it like a user would
         run: |
+          # A leftover from an older scripts/dev-install.sh would replace the
+          # packaged service; installing must move it out of the way.
+          mkdir -p /etc/systemd/system
+          printf '[Service]\nType=dbus\nBusName=org.quietbyte.Rabita1\nExecStart=/usr/local/libexec/rabita-helper\n' \
+            > /etc/systemd/system/rabita-helper.service
           apt-get install -y -q ./target/deb/rabita_*.deb
+          test ! -e /etc/systemd/system/rabita-helper.service
+          test -f /etc/systemd/system/rabita-helper.service.rabita-dev-disabled
+          grep -q '^Exec=/usr/libexec/rabita-helper' /usr/share/dbus-1/system-services/org.quietbyte.Rabita1.service
           test -x /usr/bin/rabita-app
           test -x /usr/libexec/rabita-helper
           test -f /usr/share/applications/org.quietbyte.Rabita.desktop
