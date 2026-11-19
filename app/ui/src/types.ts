@@ -19,6 +19,44 @@ export interface SystemInfo {
   joined_domain: string | null;
   realmd_installed: boolean;
   sssd_installed: boolean;
+  /** Why the computer name can't be used in the directory, if it can't. */
+  hostname_problem: string | null;
+  /** A valid name to offer instead. */
+  suggested_hostname: string | null;
+  /** Settings from an unfinished join (DNS, name) are waiting to be undone. */
+  restore_pending: boolean;
+  dns_change: DnsChange | null;
+}
+
+export interface DnsChange {
+  connection_uuid: string;
+  connection_name: string;
+  device: string;
+  server: string;
+  domain: string;
+  original_dns: string;
+  original_dns_search: string;
+  original_ignore_auto_dns: string;
+  original_ipv6_ignore_auto_dns: string;
+}
+
+export interface DnsSearch {
+  connection_name: string | null;
+  device: string | null;
+  candidates: string[];
+  scanned: number;
+  problem: string | null;
+}
+
+export interface DnsResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Sent to `Leave`; the password travels separately and is never stored. */
+export interface LeaveRequest {
+  remove_computer_account: boolean;
+  admin_user: string | null;
 }
 
 export interface DomainController {
@@ -61,6 +99,8 @@ export interface JoinRequest {
   computer_ou: string | null;
   computer_name: string | null;
   verify_user: string | null;
+  /** Rename the computer first (its current name is invalid). */
+  new_hostname: string | null;
   options: JoinOptions;
 }
 
@@ -79,6 +119,11 @@ export interface JobResult {
   steps: StepOutcome[];
   joined_not_finished: boolean;
   remaining_steps: string[];
+  /** Leave: the computer account is still in the directory. */
+  left_locally_only: boolean;
+  /** Set by the app, not the helper: the helper stopped answering or went
+   *  away before the job's result arrived. */
+  lost_contact?: boolean;
 }
 
 export interface HealthCheck {

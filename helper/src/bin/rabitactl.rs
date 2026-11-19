@@ -68,6 +68,10 @@ enum Command {
         /// Computer account name (default: host name).
         #[arg(long)]
         computer_name: Option<String>,
+        /// Rename this computer first (needed when its name is longer than
+        /// 15 characters or otherwise invalid for the directory).
+        #[arg(long)]
+        hostname: Option<String>,
         /// Domain user to look up afterwards to prove it worked.
         #[arg(long)]
         verify_user: Option<String>,
@@ -118,6 +122,21 @@ enum Command {
     /// Finish a setup that stopped after joining ("joined but not
     /// finished"), using the options chosen when joining.
     Finish,
+    /// Look on this network for DNS servers that know a domain.
+    FindDns {
+        /// Domain name, e.g. lab.quietbyte.test
+        domain: String,
+    },
+    /// Use a DNS server for this computer's network connection (checks that
+    /// it knows the domain first; Leave puts the old setting back).
+    SetDns {
+        /// Domain name, e.g. lab.quietbyte.test
+        domain: String,
+        /// DNS server address, e.g. 10.0.0.10
+        server: String,
+    },
+    /// Put back the DNS setting Rabita changed.
+    RestoreDns,
     /// Print every signal the helper emits until Ctrl-C (D-Bus mode only).
     Watch,
 }
@@ -207,6 +226,7 @@ fn join_request(cmd: &Command) -> Option<(JoinRequest, bool)> {
         user,
         ou,
         computer_name,
+        hostname,
         verify_user,
         no_manual_login,
         no_create_home,
@@ -222,6 +242,7 @@ fn join_request(cmd: &Command) -> Option<(JoinRequest, bool)> {
                 computer_ou: ou.clone(),
                 computer_name: computer_name.clone(),
                 verify_user: verify_user.clone(),
+                new_hostname: hostname.clone(),
                 options: JoinOptions {
                     manual_login: !no_manual_login,
                     create_home: !no_create_home,
@@ -236,6 +257,7 @@ fn join_request(cmd: &Command) -> Option<(JoinRequest, bool)> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one short arm per command
 fn run_direct(cli: &Cli) -> Result<(), String> {
     let runner = SystemRunner;
     let paths = Paths::system();
@@ -322,6 +344,21 @@ fn run_direct(cli: &Cli) -> Result<(), String> {
                 std::process::exit(1);
             }
         }
+        Command::FindDns { domain } => {
+            println!(
+                "{}",
+                pretty(&rabita_helper::netconf::find_dns_servers(&ctx, domain))
+            );
+        }
+        Command::SetDns { domain, server } => {
+            println!(
+                "{}",
+                pretty(&rabita_helper::netconf::set_dns_server(
+                    &ctx, domain, server
+                ))
+            );
+        }
+        Command::RestoreDns => println!("{}", pretty(&rabita_helper::netconf::restore_dns(&ctx))),
         Command::Watch => return Err("watch only works over D-Bus".into()),
     }
     Ok(())
@@ -426,6 +463,7 @@ async fn dbus_finish(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // one short arm per command
 async fn run_dbus(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let conn = if cli.session {
         zbus::Connection::session().await?
@@ -499,6 +537,11 @@ async fn run_dbus(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Finish => dbus_finish(&proxy, cli.json).await?,
+        Command::FindDns { domain } => print_json_str(&proxy.find_dns_servers(domain).await?),
+        Command::SetDns { domain, server } => {
+            print_json_str(&proxy.set_dns_server(domain, server).await?);
+        }
+        Command::RestoreDns => print_json_str(&proxy.restore_dns().await?),
         Command::Watch => {
             println!("Watching signals from the helper (Ctrl-C to stop)…");
             let stream = signal_stream(&proxy).await?;

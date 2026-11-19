@@ -147,7 +147,7 @@ pub fn setup_check(state: &crate::backup::State) -> HealthCheck {
                 "Setup",
                 Some(false),
                 format!(
-                    "Joined but not finished. Still to do: {}. Run Finish setup (rabitactl finish).",
+                    "Joined but not finished. Still to do: {}. Choose Finish setup in Rabita Setup.",
                     labels.join(", ")
                 ),
             )
@@ -157,7 +157,7 @@ pub fn setup_check(state: &crate::backup::State) -> HealthCheck {
                 "setup",
                 "Setup",
                 Some(true),
-                "Joined by an earlier version of Rabita. Run Finish setup (rabitactl finish) once to bring it up to date.",
+                "Joined by an earlier version of Rabita. Open Rabita Setup and choose Finish setup once to bring it up to date.",
             );
             hc.warning = true;
             hc
@@ -280,7 +280,7 @@ pub fn report(runner: &dyn Runner, paths: &Paths, probe: bool) -> StatusReport {
                     "sssd-config",
                     "Sign-in configuration",
                     Some(false),
-                    "sssd.conf sets default_domain_suffix, which stops SSSD 2.10 and newer from starting. Run Finish setup (rabitactl finish) to repair it.",
+                    "sssd.conf sets default_domain_suffix, which stops SSSD 2.10 and newer from starting. Open Rabita Setup and choose Finish setup to repair it.",
                 )
             } else {
                 check(
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(hc.ok, Some(false));
         assert_eq!(
             hc.detail,
-            "Joined but not finished. Still to do: Create home folders on first login, Check that it works. Run Finish setup (rabitactl finish)."
+            "Joined but not finished. Still to do: Create home folders on first login, Check that it works. Choose Finish setup in Rabita Setup."
         );
         state.setup_finished = None;
         let hc = setup_check(&state);

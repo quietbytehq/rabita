@@ -2836,8 +2836,10 @@ version = "0.1.0-dev"
 dependencies = [
  "futures-util",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
  "zbus",
  "zeroize",

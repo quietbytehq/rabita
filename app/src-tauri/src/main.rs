@@ -8,6 +8,7 @@
 //! shows the usual password dialog when the helper needs permission.
 
 mod bridge;
+mod diagnose;
 
 fn main() {
     if bridge::running_as_root() {
@@ -24,6 +25,10 @@ fn main() {
             bridge::status,
             bridge::join,
             bridge::apply_options,
+            bridge::leave,
+            bridge::find_dns_servers,
+            bridge::set_dns_server,
+            bridge::restore_dns,
             bridge::quit,
         ])
         .run(tauri::generate_context!());

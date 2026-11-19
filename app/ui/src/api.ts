@@ -7,9 +7,12 @@
 
 import type {
   DiscoveryResult,
+  DnsResult,
+  DnsSearch,
   JobResult,
   JoinOptions,
   JoinRequest,
+  LeaveRequest,
   StatusReport,
   StepState,
   SystemInfo,
@@ -38,11 +41,47 @@ function tauri(): TauriGlobal {
   return t;
 }
 
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+
+/**
+ * Last-resort limits, in case the app's Rust side itself never answers.
+ * Each is longer than the Rust side's own limits for that command (first
+ * contact 30 s, then 45 s / 120 s, or 6 minutes when the desktop's password
+ * window may be open), so normally the clearer Rust error arrives first.
+ */
+export const BACKSTOP_MS: Readonly<Record<string, number>> = {
+  detect_system: 2 * MINUTE,
+  discover_domain: 3 * MINUTE + 30 * SECOND,
+  status: 3 * MINUTE + 30 * SECOND,
+  find_dns_servers: 3 * MINUTE + 30 * SECOND,
+  join: 10 * MINUTE,
+  apply_options: 10 * MINUTE,
+  leave: 10 * MINUTE,
+  set_dns_server: 10 * MINUTE,
+  restore_dns: 10 * MINUTE,
+};
+
+/** What the window says when a backstop runs out. */
+export function backstopMessage(ms: number): string {
+  const minutes = Math.round(ms / MINUTE);
+  return `Rabita Setup stopped waiting for its background service after ${minutes} minute${minutes === 1 ? "" : "s"}. Close Rabita Setup and open it again. If this keeps happening, restart the computer.`;
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const limit = BACKSTOP_MS[cmd];
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await tauri().core.invoke<T>(cmd, args);
+    const answer = tauri().core.invoke<T>(cmd, args);
+    if (limit === undefined) return await answer;
+    const giveUp = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(backstopMessage(limit))), limit);
+    });
+    return await Promise.race([answer, giveUp]);
   } catch (e) {
     throw new Error(typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -70,6 +109,26 @@ export function join(request: JoinRequest, password: string): Promise<number> {
 /** Re-applies options, or finishes a setup that stopped after joining. */
 export function applyOptions(options: JoinOptions): Promise<number> {
   return call<number>("apply_options", { options: JSON.stringify(options) });
+}
+
+/** Leaves the domain, or undoes an unfinished join; returns the job id. */
+export function leave(request: LeaveRequest, password: string): Promise<number> {
+  return call<number>("leave", { request: JSON.stringify(request), password });
+}
+
+/** Looks on this network for DNS servers that know the domain. */
+export function findDnsServers(domain: string): Promise<DnsSearch> {
+  return callJson<DnsSearch>("find_dns_servers", { domain });
+}
+
+/** Makes `server` this computer's DNS server (asks for an admin password). */
+export function setDnsServer(domain: string, server: string): Promise<DnsResult> {
+  return callJson<DnsResult>("set_dns_server", { domain, server });
+}
+
+/** Puts back the DNS setting Rabita changed. */
+export function restoreDns(): Promise<DnsResult> {
+  return callJson<DnsResult>("restore_dns");
 }
 
 export function quit(): Promise<void> {
@@ -121,6 +180,7 @@ export function onFinished(cb: (e: FinishedEvent) => void): Promise<() => void> 
         steps: [],
         joined_not_finished: false,
         remaining_steps: [],
+        left_locally_only: false,
       };
     }
     cb({ job: p.job, ok: p.ok, result });

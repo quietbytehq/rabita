@@ -49,6 +49,9 @@ Rabita is three programs in one repository. Only one of them runs as root.
 | `Leave`          | yes          | `realm leave`, restore backed-up configs           |
 | `Status`         | no           | Joined?, DC, health checks                         |
 | `ApplyOptions`   | yes          | Re-apply wizard options (who can sign in, home folders, login screen) |
+| `FindDnsServers` | no           | Look on the local network for DNS servers that know the domain |
+| `SetDnsServer`   | yes          | Point the active NetworkManager connection at the organization's DNS server (recorded for Leave) |
+| `RestoreDns`     | yes          | Put that DNS setting back                          |
 
 `Join`, `Leave` and `ApplyOptions` return a job id immediately and stream
 `Progress(job, step, state, message)`, `LogLine(job, line)` and
@@ -73,8 +76,17 @@ live and no D-Bus call waits on `apt-get`.
 
 `rabita-app` is a Tauri 2 window whose page lives in `app/ui` (TypeScript,
 HTML, CSS, bundled Manrope font). The page calls Rust commands
-(`detect_system`, `discover_domain`, `status`, `join`, `apply_options`),
-which pass the helper's JSON straight through. Before a job starts, the Rust
+(`detect_system`, `discover_domain`, `status`, `join`, `apply_options`,
+`leave`, `find_dns_servers`, `set_dns_server`, `restore_dns`), which pass the
+helper's JSON straight through.
+
+Everything a technician needs is in the window, so no terminal or `sudo` is
+ever needed: the computer name is fixed on Welcome, a missing DNS server on
+*Your organization*, and a computer that is already joined opens on a
+**Status** screen with **Refresh**, **Finish setup** (when needed) and
+**Leave domain**. Permission always comes from the desktop's own polkit
+password window, which the helper triggers; the app never sees the
+computer's admin password. Before a job starts, the Rust
 side subscribes to the helper's `Progress`, `LogLine` and `JobFinished`
 signals and forwards them to the page as events, so the checklist updates
 live. The app refuses to run as root and has a strict content-security
@@ -86,4 +98,28 @@ policy; it loads nothing from the internet.
   the wizard. `--session` targets a helper started with `rabita-helper
   --session`; `--direct` runs the library in-process (lab debugging only).
 - `scripts/dev-install.sh` / `dev-uninstall.sh` — install a development build
-  with its polkit and D-Bus files on a lab VM.
+  with its polkit and D-Bus files on a lab VM. The dev build runs as
+  `rabita-helper-dev.service` and marks the files it writes, so it can never
+  replace the packaged `rabita-helper.service`; it refuses to run while the
+  package is installed. The package's postinst moves leftovers from older
+  dev installs out of the way (`*.rabita-dev-disabled`), reports any other
+  local override, and restarts a helper left running from before.
+
+## Never waiting forever
+
+- Every call from the wizard to the helper has a time limit (30 s to start
+  the helper, 45 s or 120 s for checks, 6 minutes when the desktop's
+  password window may be open). The page has a longer last-resort limit
+  of its own.
+- The helper closes an unanswered password window after 5 minutes
+  (polkit `CancelCheckAuthorization`), so a job can't start after the
+  wizard gave up.
+- The first contact checks the helper's `Version` matches the wizard's.
+- While a job runs, the wizard checks every 15 s that the same helper still
+  owns the bus name and is `Busy`; if it is gone, idle without a result, or
+  silent for a minute, the window gets a "lost track of this job" result
+  that tells the technician to reopen Rabita Setup.
+- When the helper is missing, stuck or the wrong copy, the error names the
+  likely reason (an `/etc` override, a drop-in, an activation file in
+  `/usr/local`, a dev build, a different program owning the name).
+- The packaged unit has `TimeoutStartSec=20`.

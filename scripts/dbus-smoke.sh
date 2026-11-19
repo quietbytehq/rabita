@@ -20,7 +20,12 @@ dbus-daemon --session --address="$ADDR" --nofork --nopidfile >/dev/null 2>&1 &
 DPID=$!
 sleep 0.5
 export DBUS_SESSION_BUS_ADDRESS="$ADDR"
-"$BIN/rabita-helper" --session 2>"$TMP/helper.log" &
+# The helper asks polkit over the system bus. Give it one that doesn't
+# exist, so every privileged call is refused (fail closed) and this test can
+# never change the computer it runs on, whoever runs it (root, or a user
+# whose admin password polkit still remembers).
+DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMP/no-system-bus" \
+  "$BIN/rabita-helper" --session 2>"$TMP/helper.log" &
 HPID=$!
 for _ in $(seq 1 20); do
   grep -q "serving org.quietbyte.Rabita1" "$TMP/helper.log" 2>/dev/null && break
@@ -50,6 +55,21 @@ rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "join was not refused"
 grep -Eq 'AuthFailed|AccessDenied' <<<"$out" || fail "join refusal: $out"
+
+# Every other privileged method is refused the same way, and none leaves the helper busy.
+for cmd in "set-dns lab.example.test 10.0.0.10" "restore-dns" "leave"; do
+  set +e
+  # shellcheck disable=SC2086
+  out="$("$BIN/rabitactl" --session $cmd 2>&1)"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$cmd was not refused"
+  grep -Eq 'AuthFailed|AccessDenied' <<<"$out" || fail "$cmd refusal: $out"
+done
+
+# Looking for DNS servers needs no password and answers even without NetworkManager.
+out="$("$BIN/rabitactl" --session --json find-dns lab.example.test)"
+grep -q '"candidates"' <<<"$out" || fail "find-dns: $out"
 
 busy="$(busctl --address="$ADDR" get-property org.quietbyte.Rabita1 /org/quietbyte/Rabita1 org.quietbyte.Rabita1 Busy)"
 [ "$busy" = "b false" ] || fail "helper busy after refused join: $busy"

@@ -18,7 +18,10 @@ consume them directly and the interface stays stable while the structures grow.
 | `DiscoverDomain(domain s)` | domain name | `s` JSON `DiscoveryResult` | no | DNS SRV lookup of `_ldap._tcp.dc._msdcs.<domain>` (plus the client site's `_sites` record when `adcli` can tell the site), parallel TCP/SNTP probes, ranking and warnings |
 | `Status()` | – | `s` JSON `StatusReport` | no | Membership, sssd config/service, keytab, Kerberos ticket, DC reachability, clock, home dirs, user lookup |
 | `Join(request s, password s)` | JSON `JoinRequest`, admin password | `u` job id | **yes** | Returns at once; progress via signals |
-| `Leave(request s, password s)` | JSON `LeaveRequest`, password (empty unless removing the computer account) | `u` job id | **yes** | Restores every backed-up file |
+| `Leave(request s, password s)` | JSON `LeaveRequest`, password (empty unless removing the computer account) | `u` job id | **yes** | Leaves (removing the computer account if asked, else locally), then restores every backed-up file, the login rules, the login screen, the DNS setting and the computer name. On a computer that is not joined it undoes what an unfinished attempt left (DNS, name) |
+| `FindDnsServers(domain s)` | domain name | `s` JSON `DnsSearch` | no | Looks at the gateway, then the rest of the active connection's network (at most a /24), for DNS servers that answer for `_ldap._tcp.dc._msdcs.<domain>`. Read-only |
+| `SetDnsServer(domain s, server s)` | domain, IP address | `s` JSON `DnsResult` | **yes** | Checks that `server` knows the domain **before** changing anything, records the active NetworkManager connection's DNS settings, sets the new server, and waits for the domain to resolve. Leave (or `RestoreDns`) puts the old setting back |
+| `RestoreDns()` | – | `s` JSON `DnsResult` | **yes** | Puts back the DNS setting `SetDnsServer` changed. Nothing to do is not an error |
 | `ApplyOptions(options s)` | JSON `JoinOptions` | `u` job id | **yes** | Re-applies who-can-sign-in, home-folder and login-screen options. On a computer that is joined but not finished it runs every post-join step to finish setup (see below) |
 
 Privileged methods check `org.quietbyte.rabita.manage` with
@@ -26,6 +29,10 @@ Privileged methods check `org.quietbyte.rabita.manage` with
 Root is always authorised. A refusal returns
 `org.freedesktop.DBus.Error.AccessDenied`; if polkit cannot be reached the
 helper fails closed with `org.freedesktop.DBus.Error.AuthFailed`.
+
+If the desktop's password window is left unanswered for 5 minutes, the
+helper closes it (polkit `CancelCheckAuthorization`) and refuses with
+`AccessDenied` (*Nobody answered the password window within 5 minutes…*).
 
 Only one job runs at a time; a second `Join`/`Leave` while busy returns
 `org.freedesktop.DBus.Error.Failed`.
@@ -50,7 +57,32 @@ missed.
 
 ## Join steps (ids used in `Progress`)
 
-`detect`, `packages`, `time`, `join`, `sssd`, `access`, `home`, `display`, `verify`.
+`detect`, `packages`, `time`, `name`, `join`, `sssd`, `access`, `home`, `display`, `verify`.
+
+`name` renames the computer (`hostnamectl set-hostname`, plus its line in
+`/etc/hosts`, both backed up) when `JoinRequest.new_hostname` is set, and is
+`skipped` otherwise. Active Directory computer names can have at most 15
+characters, only letters, digits and hyphens, no hyphen at either end, and
+not only digits. `DetectSystem` reports a current name that breaks these
+rules as `hostname_problem`, with a `suggested_hostname`; `Join` then refuses
+unless `new_hostname` is given. The original name is recorded, and Leave
+restores it.
+
+## Computer name and DNS fields
+
+- `JoinRequest.new_hostname` (`string|null`): rename to this before joining.
+- `SystemInfo.hostname_problem`, `SystemInfo.suggested_hostname`: see above.
+- `SystemInfo.dns_change` (`DnsChange|null`): the DNS change Rabita made and
+  the original values it will restore: `connection_uuid`, `connection_name`,
+  `device`, `server`, `domain`, `original_dns`, `original_dns_search`,
+  `original_ignore_auto_dns`, `original_ipv6_ignore_auto_dns`.
+- `SystemInfo.restore_pending` (`bool`): the computer is not joined but an
+  unfinished attempt left a DNS change or a new name. The wizard offers
+  **Undo changes**, which is `Leave` with `remove_computer_account: false`.
+- `DnsSearch`: `connection_name`, `device`, `candidates` (IP addresses that
+  know the domain), `scanned` (how many were asked), `problem` (plain-text
+  reason when it could not look, for example without NetworkManager).
+- `DnsResult`: `ok`, `message` (plain text, shown as is).
 
 ## Discovery result (`DiscoveryResult`)
 
@@ -126,9 +158,24 @@ of the domain name, so realmd enrols through that server. If realm cannot use
 it, the step retries with the domain name and logs a warning. The step
 message names the DC that adcli reports it used.
 
-## Leave steps
+## Leave
 
-`leave`, `restore`, `login`, `display`, `finish`.
+`LeaveRequest`: `{ "remove_computer_account": bool, "admin_user": string|null }`.
+The password argument is empty unless `remove_computer_account` is true.
+
+Steps: `leave`, `restore`, `login`, `display`, `dns`, `name`, `finish`.
+
+- `leave`: `realm leave`, with `--remove` and the admin account when asked
+  (password on standard input). If the credentials are refused, the job
+  stops and nothing else changes. If the domain cannot be reached, the
+  helper logs a warning, leaves on this computer only, and sets
+  `JobResult.left_locally_only: true`; the summary tells the technician to
+  delete the computer account in Active Directory Users and Computers.
+- `restore` to `name` are best effort: each one runs even if an earlier one
+  failed, and failures are listed in the summary (*some settings could not
+  be put back*). The state file is kept in that case so running Leave again
+  retries them.
+- `finish` clears the state file when everything was put back.
 
 ## Password handling
 

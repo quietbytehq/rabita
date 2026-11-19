@@ -41,13 +41,10 @@
       </footer>
     </div>
 
-    <dialog id="confirm" aria-labelledby="confirm-title">
-      <p class="dialog-title" id="confirm-title">Close Rabita Setup?</p>
-      <p>Nothing on this computer has been changed yet.</p>
-      <div class="dialog-buttons">
-        <button class="btn" id="confirm-stay" type="button">Keep going</button>
-        <button class="btn primary" id="confirm-quit" type="button">Close</button>
-      </div>
+    <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-body">
+      <p class="dialog-title" id="dialog-title"></p>
+      <p id="dialog-body"></p>
+      <div class="dialog-buttons" id="dialog-buttons"></div>
     </dialog>
   </body>
 </html>

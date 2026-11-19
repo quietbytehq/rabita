@@ -221,6 +221,44 @@ pub fn lookup_srv(
     Err(last)
 }
 
+/// Asks many DNS servers at once for `name` and returns those that answered
+/// with SRV records, in the order given. One UDP socket, one query each;
+/// waits at most `timeout` in total. Used to find the organization's DNS
+/// server on the local network.
+#[must_use]
+pub fn probe_servers(servers: &[SocketAddr], name: &str, timeout: Duration) -> Vec<SocketAddr> {
+    let Ok(sock) = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))) else {
+        return Vec::new();
+    };
+    let base = u16::try_from(std::process::id() & 0xFFFF).unwrap_or(0x1234) ^ 0x3C3C;
+    let id_for = |i: usize| base.wrapping_add(u16::try_from(i & 0xFFFF).unwrap_or(0));
+    for (i, server) in servers.iter().enumerate() {
+        let _ = sock.send_to(&build_srv_query(id_for(i), name), server);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut answered = vec![false; servers.len()];
+    let mut buf = [0u8; 4096];
+    while answered.iter().any(|a| !a) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || sock.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        let Ok((n, from)) = sock.recv_from(&mut buf) else {
+            break;
+        };
+        if let Some(i) = servers.iter().position(|s| *s == from) {
+            if parse_srv_response(&buf[..n], id_for(i)).is_ok() {
+                answered[i] = true;
+            }
+        }
+    }
+    servers
+        .iter()
+        .zip(answered)
+        .filter_map(|(s, ok)| ok.then_some(*s))
+        .collect()
+}
+
 /// The SRV name domain controllers register for LDAP.
 #[must_use]
 pub fn dc_srv_name(domain: &str) -> String {
@@ -312,6 +350,31 @@ mod tests {
         let mut nx = sample_response(1);
         nx[3] = 0x83; // rcode 3
         assert_eq!(parse_srv_response(&nx, 1), Err(DnsError::NoRecords));
+    }
+
+    #[test]
+    fn probe_finds_only_servers_that_know_the_domain() {
+        // A tiny DNS server on localhost that answers every query with two
+        // SRV records, echoing the query id.
+        let knows = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let knows_addr = knows.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while let Ok((_, from)) = knows.recv_from(&mut buf) {
+                let id = u16::from_be_bytes([buf[0], buf[1]]);
+                let _ = knows.send_to(&sample_response(id), from);
+            }
+        });
+        // One that is silent, like an address with no DNS server.
+        let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let silent_addr = silent.local_addr().unwrap();
+        let found = probe_servers(
+            &[silent_addr, knows_addr],
+            "_ldap._tcp.dc._msdcs.lab.test",
+            Duration::from_millis(500),
+        );
+        assert_eq!(found, [knows_addr]);
+        drop(silent);
     }
 
     #[test]

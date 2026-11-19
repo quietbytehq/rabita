@@ -17,17 +17,20 @@ Ubuntu · Debian · Linux Mint · Fedora · Red Hat · Rocky · openSUSE · Arch
 
 ## Install
 
-Download `rabita_<version>_amd64.deb` and double-click it, or run
-`sudo apt install ./rabita_<version>_amd64.deb`. Then open **Rabita Setup**
-from the app menu. (During development the `.deb` is attached to each pull
+Download `rabita_<version>_amd64.deb` and double-click it: App Center (or
+Discover on KDE) installs it after asking for your password. Then open
+**Rabita Setup** from the app menu. No terminal is needed, from installing to
+leaving the domain. (During development the `.deb` is attached to each pull
 request's CI run as the **rabita-deb** artifact.)
 
 ## Status
 🚧 In development. First release (v0.1) coming soon.
 
 Done so far: the **Rabita Setup** wizard (six screens, installs as a `.deb`),
-and the root helper behind it, which joins and leaves a domain over D-Bus
-with polkit. Network drives and printers come next. See `docs/testing.md`
+which also fixes a computer name that is too long and a missing DNS server,
+and, once joined, shows a **Status** screen with **Leave domain**; and the
+root helper behind it, which joins and leaves a domain over D-Bus with polkit
+and puts back every setting it changed. Network drives and printers come next. See `docs/testing.md`
 for how each milestone is tested in the lab.
 
 ## How it works

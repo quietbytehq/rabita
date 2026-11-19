@@ -7,10 +7,19 @@ import {
   adminProblem,
   ALL_STEPS,
   buildJoinRequest,
+  buildLeaveRequest,
+  checkTone,
   describeDiscovery,
   domainProblem,
   emptyForm,
   finishView,
+  formatDate,
+  hostnameProblem,
+  ipProblem,
+  LEAVE_STEP_IDS,
+  leaveProblem,
+  leaveView,
+  LOST_TITLE,
   looksLikeDomain,
   normaliseAdminUser,
   normaliseDomain,
@@ -71,6 +80,7 @@ test("the join request never contains the password", () => {
     computer_ou: "OU=Linux PCs,DC=lab",
     computer_name: null,
     verify_user: null,
+    new_hostname: null,
     options: {
       manual_login: true,
       create_home: true,
@@ -82,7 +92,7 @@ test("the join request never contains the password", () => {
 });
 
 test("step lists match the helper", () => {
-  assert.deepEqual(ALL_STEPS, ["detect", "packages", "time", "join", "sssd", "access", "home", "display", "verify"]);
+  assert.deepEqual(ALL_STEPS, ["detect", "packages", "time", "name", "join", "sssd", "access", "home", "display", "verify"]);
   assert.deepEqual(POST_JOIN_STEPS, ["sssd", "access", "home", "display", "verify"]);
   assert.equal(stepLabel("home"), "Create home folders on first login");
 });
@@ -166,4 +176,120 @@ test("the finish screen offers the right way forward", () => {
   assert.equal(finishView(result({ summary: "The administrator username or password was not accepted." }), "x").backTo, "admin");
   assert.equal(finishView(result({ summary: "The domain could not be found. Check the domain name." }), "x").backTo, "organization");
   assert.equal(finishView(result({ summary: "Install domain login packages failed: ..." }), "x").backTo, "options");
+});
+
+test("computer names follow the directory's rules, like the helper", () => {
+  assert.equal(hostnameProblem("lab-pc-01"), null);
+  assert.equal(hostnameProblem("  lab-pc-01 "), null);
+  assert.match(hostnameProblem("lab-classroom-pc-01"), /19 characters long/);
+  assert.match(hostnameProblem("lab_pc"), /letters, numbers and hyphens/);
+  assert.match(hostnameProblem("lab.pc"), /letters, numbers and hyphens/);
+  assert.match(hostnameProblem("-lab"), /start or end with a hyphen/);
+  assert.match(hostnameProblem("lab-"), /start or end with a hyphen/);
+  assert.match(hostnameProblem("2024"), /only numbers/);
+  assert.match(hostnameProblem(""), /Enter a name/);
+  assert.equal(hostnameProblem("a23456789012345"), null, "exactly 15 is allowed");
+});
+
+test("the new computer name is sent only when a rename is needed", () => {
+  const form = { ...emptyForm(), domain: "lab.quietbyte.test", adminUser: "joiner", newHostname: " lab-pc-12 " };
+  assert.equal(buildJoinRequest(form).new_hostname, null);
+  assert.equal(buildJoinRequest(form, true).new_hostname, "lab-pc-12");
+});
+
+test("DNS server addresses are checked before anything changes", () => {
+  assert.equal(ipProblem("10.0.0.10"), null);
+  assert.equal(ipProblem(" 192.168.1.1 "), null);
+  assert.equal(ipProblem("fd00::10"), null);
+  assert.match(ipProblem(""), /Enter the DNS server's IP address/);
+  assert.match(ipProblem("10.0.0"), /not an IP address/);
+  assert.match(ipProblem("10.0.0.256"), /not an IP address/);
+  assert.match(ipProblem("dc1.lab.test"), /not an IP address/);
+});
+
+test("not finding the domain offers the DNS fix; finding it does not", () => {
+  const notFound = describeDiscovery({
+    domain: "lab.quietbyte.test", realm: "LAB.QUIETBYTE.TEST", found: false, controllers: [],
+    problem: "No domain controllers were found", client_site: null, recommended: null,
+    majority_clock_offset_secs: null, warnings: [],
+  });
+  assert.ok(notFound.dnsFixable);
+  assert.ok(!notFound.canContinue);
+  const unreachable = describeDiscovery({
+    domain: "lab.quietbyte.test", realm: "LAB.QUIETBYTE.TEST", found: true,
+    controllers: [{ host: "dc1", port: 389, priority: 0, weight: 0, reachable: false, clock_offset_secs: null, in_client_site: false, recommended: false, warning: null }],
+    problem: "None answered", client_site: null, recommended: null, majority_clock_offset_secs: null, warnings: [],
+  });
+  assert.ok(!unreachable.dnsFixable, "DNS works when the records were found");
+});
+
+test("leaving needs an admin sign-in only when removing the computer account", () => {
+  const form = { ...emptyForm(), removeAccount: true, leaveUser: "", leavePassword: "" };
+  assert.notEqual(leaveProblem(form), null);
+  assert.equal(leaveProblem({ ...form, leaveUser: "LAB\\admin", leavePassword: "pw" }), null);
+  assert.equal(leaveProblem({ ...form, removeAccount: false }), null);
+  assert.deepEqual(buildLeaveRequest({ ...form, leaveUser: "LAB\\admin", leavePassword: "pw" }), {
+    remove_computer_account: true,
+    admin_user: "admin",
+  });
+  assert.deepEqual(buildLeaveRequest({ ...form, removeAccount: false, leaveUser: "admin" }), {
+    remove_computer_account: false,
+    admin_user: null,
+  });
+  assert.ok(emptyForm().removeAccount, "removing the account is the default");
+});
+
+const leaveResult = (over) => ({
+  ok: true, summary: "", steps: [], joined_not_finished: false, remaining_steps: [], left_locally_only: false, ...over,
+});
+
+test("leave results explain what happened and what to do next", () => {
+  const removed = leaveView(leaveResult({ summary: "This computer has left lab.quietbyte.test, its computer account was removed." }), "lab.quietbyte.test", false);
+  assert.equal(removed.tone, "ok");
+  assert.equal(removed.title, "This computer has left lab.quietbyte.test");
+  const local = leaveView(leaveResult({ left_locally_only: true, summary: "…ask your IT admin to delete it in Active Directory Users and Computers." }), "lab.quietbyte.test", false);
+  assert.equal(local.tone, "warn");
+  assert.equal(local.title, "Left on this computer only");
+  const badPassword = leaveView(leaveResult({ ok: false, summary: "The administrator username or password was not accepted." }), "lab.quietbyte.test", false);
+  assert.equal(badPassword.backTo, "leave");
+  const notAllowed = leaveView(leaveResult({ ok: false, summary: "That account is not allowed to remove computers from the domain." }), "lab.quietbyte.test", false);
+  assert.equal(notAllowed.backTo, "leave");
+  const partial = leaveView(leaveResult({ ok: false, summary: "This computer has left lab.quietbyte.test, but some settings could not be put back: x." }), "lab.quietbyte.test", false);
+  assert.equal(partial.tone, "warn");
+  assert.ok(partial.canRetry);
+  assert.equal(partial.backTo, null);
+  const undone = leaveView(leaveResult({ summary: "Rabita put back the settings it had changed." }), "", true);
+  assert.equal(undone.title, "Changes undone");
+});
+
+test("leave steps match the helper's", () => {
+  assert.deepEqual(LEAVE_STEP_IDS, ["leave", "restore", "login", "display", "dns", "name", "finish"]);
+  assert.equal(stepLabel("dns", true), "Restore the DNS server");
+  assert.equal(stepLabel("name"), "Set the computer name");
+  assert.equal(stepLabel("name", true), "Restore the computer name");
+  assert.ok(ALL_STEPS.includes("name"), "a join can rename the computer");
+  assert.equal(ALL_STEPS.indexOf("name"), ALL_STEPS.indexOf("join") - 1, "the rename happens just before joining");
+});
+
+test("health checks and dates are shown plainly", () => {
+  const c = { id: "x", label: "X", detail: "", warning: false };
+  assert.equal(checkTone({ ...c, ok: true }), "ok");
+  assert.equal(checkTone({ ...c, ok: true, warning: true }), "warn");
+  assert.equal(checkTone({ ...c, ok: false }), "error");
+  assert.equal(checkTone({ ...c, ok: null }), "none");
+  assert.equal(formatDate("2026-11-13T09:00:00Z"), "13 November 2026");
+  assert.equal(formatDate(null), "Not known");
+});
+
+test("a job the app lost track of is never shown as a plain failure", () => {
+  const lost = leaveResult({ ok: false, lost_contact: true, summary: "Rabita Setup lost contact… open it again." });
+  const f = finishView(lost, "lab.quietbyte.test");
+  assert.equal(f.title, LOST_TITLE);
+  assert.equal(f.tone, "warn");
+  assert.equal(f.backTo, null, "no Back: the join may have gone ahead");
+  assert.equal(f.canFinishSetup, false);
+  const l = leaveView(lost, "lab.quietbyte.test", false);
+  assert.equal(l.title, LOST_TITLE);
+  assert.equal(l.backTo, null);
+  assert.equal(l.canRetry, false);
 });

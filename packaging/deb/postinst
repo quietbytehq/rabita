@@ -2,14 +2,117 @@
 # SPDX-License-Identifier: Apache-2.0
 set -e
 
+# Messages go to the terminal (apt) and the system log, because App Center
+# and Discover do not show them.
+note() {
+    echo "Rabita: $*" >&2
+    if command -v logger >/dev/null 2>&1; then
+        logger -t rabita -- "$*" || true
+    fi
+}
+
+# True if a file was written by Rabita's scripts/dev-install.sh (any
+# version). Only such files are moved out of the way; anything else an
+# administrator made is reported and left alone.
+dev_leftover() {
+    [ -f "$1" ] && [ ! -L "$1" ] &&
+        grep -q -e "scripts/dev-install.sh" -e "/usr/local/libexec/rabita-helper" "$1"
+}
+
+# Moves a leftover aside (not deleted, so it can be put back by hand).
+set_aside() {
+    mv -f "$1" "$1.rabita-dev-disabled"
+    note "moved a leftover test installation file out of the way: $1 is now $1.rabita-dev-disabled"
+}
+
+# A development install must not override the packaged helper. These are
+# the places that would.
+check_overrides() {
+    unit=/etc/systemd/system/rabita-helper.service
+    if [ -L "$unit" ] && [ "$(readlink "$unit")" = /dev/null ]; then
+        note "rabita-helper.service is masked, so Rabita Setup cannot start its background service. Unmask it with: systemctl unmask rabita-helper.service"
+    elif dev_leftover "$unit"; then
+        set_aside "$unit"
+    elif [ -e "$unit" ]; then
+        note "$unit replaces the packaged /usr/lib/systemd/system/rabita-helper.service. It is left as it is; remove it unless it was made on purpose."
+    fi
+
+    for dropin in /etc/systemd/system/rabita-helper.service.d/*.conf; do
+        [ -e "$dropin" ] || continue
+        if dev_leftover "$dropin"; then
+            set_aside "$dropin"
+        else
+            note "$dropin changes how Rabita's background service starts. It is left as it is; remove it unless it was made on purpose."
+        fi
+    done
+
+    # The system bus reads /usr/local/share before /usr/share.
+    local_activation=/usr/local/share/dbus-1/system-services/org.quietbyte.Rabita1.service
+    if dev_leftover "$local_activation"; then
+        set_aside "$local_activation"
+    elif [ -e "$local_activation" ]; then
+        note "$local_activation starts a different copy of Rabita's background service instead of the packaged one. It is left as it is; remove it unless it was made on purpose."
+    fi
+
+    if [ -e /etc/systemd/system/rabita-helper-dev.service ]; then
+        note "a development build's rabita-helper-dev.service is still installed. The package does not use it; remove it with scripts/dev-uninstall.sh."
+    fi
+    if [ -e /usr/local/bin/rabitactl ]; then
+        note "/usr/local/bin/rabitactl (a development build) comes before the packaged /usr/bin/rabitactl when typed in a terminal; remove it with scripts/dev-uninstall.sh."
+    fi
+}
+
+# Asks the running helper whether it is in the middle of a job. Never starts
+# it: callers only ask when it is running. No answer in 5 s counts as "not
+# busy" (a stuck helper should be replaced).
+helper_busy() {
+    command -v busctl >/dev/null 2>&1 || return 1
+    busctl --system --timeout=5 get-property org.quietbyte.Rabita1 /org/quietbyte/Rabita1 \
+        org.quietbyte.Rabita1 Busy 2>/dev/null | grep -q "true"
+}
+
+# The process that owns the helper's bus name, if any (as "PID PROGRAM").
+helper_owner() {
+    command -v busctl >/dev/null 2>&1 || return 0
+    pid=$(busctl --system --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus GetConnectionUnixProcessID s org.quietbyte.Rabita1 2>/dev/null |
+        awk '{print $2}')
+    [ -n "$pid" ] || return 0
+    echo "$pid $(readlink "/proc/$pid/exe" 2>/dev/null || echo unknown)"
+}
+
+# After installing or upgrading, the next request must reach the packaged
+# helper, not a copy still running from before.
+replace_running_helper() {
+    for u in rabita-helper.service rabita-helper-dev.service; do
+        systemctl is-active --quiet "$u" 2>/dev/null || continue
+        if helper_busy; then
+            note "the running background service is in the middle of a job, so it was not restarted. Restart the computer when the job has finished."
+            return 0
+        fi
+        systemctl stop "$u" >/dev/null 2>&1 || true
+    done
+    owner=$(helper_owner)
+    if [ -n "$owner" ]; then
+        exe=${owner#* }
+        if [ "$exe" != /usr/libexec/rabita-helper ]; then
+            note "another copy of Rabita's background service is running (process ${owner% *}, $exe), probably started by hand for testing. Stop it (Ctrl+C in its terminal) or restart the computer."
+        fi
+    fi
+}
+
 if [ "$1" = "configure" ]; then
+    check_overrides
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-    # Let the system bus pick up the policy for org.quietbyte.Rabita1 now,
-    # not after the next reboot.
+    # Let the system bus pick up the policy and activation file for
+    # org.quietbyte.Rabita1 now, not after the next reboot.
     if command -v busctl >/dev/null 2>&1; then
         busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig >/dev/null 2>&1 || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        replace_running_helper
     fi
 fi
 

@@ -9,7 +9,8 @@
 
   <action id="org.quietbyte.rabita.manage">
     <description>Connect this computer to, or disconnect it from, your organization</description>
-    <message>Authentication is required to change how this computer signs in to your organization</message>
+    <message>Rabita Setup needs an administrator's password to change how this computer signs in to your organization.</message>
+    <icon_name>org.quietbyte.Rabita</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
