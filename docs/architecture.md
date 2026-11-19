@@ -98,4 +98,28 @@ policy; it loads nothing from the internet.
   the wizard. `--session` targets a helper started with `rabita-helper
   --session`; `--direct` runs the library in-process (lab debugging only).
 - `scripts/dev-install.sh` / `dev-uninstall.sh` — install a development build
-  with its polkit and D-Bus files on a lab VM.
+  with its polkit and D-Bus files on a lab VM. The dev build runs as
+  `rabita-helper-dev.service` and marks the files it writes, so it can never
+  replace the packaged `rabita-helper.service`; it refuses to run while the
+  package is installed. The package's postinst moves leftovers from older
+  dev installs out of the way (`*.rabita-dev-disabled`), reports any other
+  local override, and restarts a helper left running from before.
+
+## Never waiting forever
+
+- Every call from the wizard to the helper has a time limit (30 s to start
+  the helper, 45 s or 120 s for checks, 6 minutes when the desktop's
+  password window may be open). The page has a longer last-resort limit
+  of its own.
+- The helper closes an unanswered password window after 5 minutes
+  (polkit `CancelCheckAuthorization`), so a job can't start after the
+  wizard gave up.
+- The first contact checks the helper's `Version` matches the wizard's.
+- While a job runs, the wizard checks every 15 s that the same helper still
+  owns the bus name and is `Busy`; if it is gone, idle without a result, or
+  silent for a minute, the window gets a "lost track of this job" result
+  that tells the technician to reopen Rabita Setup.
+- When the helper is missing, stuck or the wrong copy, the error names the
+  likely reason (an `/etc` override, a drop-in, an activation file in
+  `/usr/local`, a dev build, a different program owning the name).
+- The packaged unit has `TimeoutStartSec=20`.

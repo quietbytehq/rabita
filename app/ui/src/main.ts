@@ -1003,6 +1003,9 @@ function footerSpec(): { back: ButtonSpec; next: ButtonSpec; extra: ButtonSpec; 
       if (s?.restore_pending === true && s.joined_domain === null) {
         extra = button("Undo changes", () => void startUndo(), false, !state.busy);
       }
+      if (state.systemError !== null) {
+        extra = button("Try again", () => void retryStart(), false, !state.busy);
+      }
       break;
     }
     case "organization": {
@@ -1425,6 +1428,24 @@ async function refreshSystem(): Promise<void> {
   } catch (e) {
     state.systemError = (e as Error).message;
   }
+}
+
+/** Welcome's Try again after the first check failed (for example, the
+ *  background service did not answer). */
+async function retryStart(): Promise<void> {
+  state.busy = true;
+  state.systemError = null;
+  render();
+  await refreshSystem();
+  state.busy = false;
+  if (state.system?.joined_domain != null) {
+    state.screen = "status";
+    render(true);
+    await refreshStatus();
+  } else {
+    render();
+  }
+  focusFirst();
 }
 
 async function refreshStatus(): Promise<void> {

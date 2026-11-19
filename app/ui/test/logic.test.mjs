@@ -19,6 +19,7 @@ import {
   LEAVE_STEP_IDS,
   leaveProblem,
   leaveView,
+  LOST_TITLE,
   looksLikeDomain,
   normaliseAdminUser,
   normaliseDomain,
@@ -278,4 +279,17 @@ test("health checks and dates are shown plainly", () => {
   assert.equal(checkTone({ ...c, ok: null }), "none");
   assert.equal(formatDate("2026-11-13T09:00:00Z"), "13 November 2026");
   assert.equal(formatDate(null), "Not known");
+});
+
+test("a job the app lost track of is never shown as a plain failure", () => {
+  const lost = leaveResult({ ok: false, lost_contact: true, summary: "Rabita Setup lost contact… open it again." });
+  const f = finishView(lost, "lab.quietbyte.test");
+  assert.equal(f.title, LOST_TITLE);
+  assert.equal(f.tone, "warn");
+  assert.equal(f.backTo, null, "no Back: the join may have gone ahead");
+  assert.equal(f.canFinishSetup, false);
+  const l = leaveView(lost, "lab.quietbyte.test", false);
+  assert.equal(l.title, LOST_TITLE);
+  assert.equal(l.backTo, null);
+  assert.equal(l.canRetry, false);
 });

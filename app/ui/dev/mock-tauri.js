@@ -4,7 +4,7 @@
 // Pick a scenario with window.__RABITA_SCENARIO__ before the page loads:
 //   ok (default) · unsupported · long-name · no-dns · wrong-password · not-finished
 //   restore-pending · joined · joined-unfinished · joined-unreachable · joined-wrong-password
-//   leave-problem
+//   leave-problem · helper-silent (first check fails once) · job-lost
 (() => {
   const scenario = window.__RABITA_SCENARIO__ ?? "ok";
   const stepMs = window.__RABITA_STEP_MS__ ?? 220;
@@ -170,9 +170,16 @@
     finish(id, { ok: true, summary, steps: outcomes, left_locally_only: !undo && local });
   }
 
+  let silentOnce = scenario === "helper-silent";
+
   const commands = {
     async detect_system() {
       await wait(150);
+      if (silentOnce) {
+        silentOnce = false;
+        // What the app's Rust side says when the helper never answers.
+        throw "Rabita Setup's background service did not answer within 30 seconds. A leftover test installation of Rabita (/etc/systemd/system/rabita-helper.service) replaces the installed background service. Restart the computer and open Rabita Setup again. If that does not help, remove Rabita in App Center and install it again: installing moves leftover test files out of the way.";
+      }
       return JSON.stringify(system());
     },
     async status() {
@@ -269,6 +276,20 @@
                 summary: "This computer is joined to lab.quietbyte.test but not finished. Turn on domain sign-in and home folder creation failed: pam-auth-update: profile not found. Until setup is finished, domain sign-in may not work properly (for example, home folders may not be created). Fix the problem, then choose Finish setup in Rabita Setup to complete the remaining steps: Create home folders on first login, Show a username box on the login screen, Check that it works.",
               }
             : null;
+      if (scenario === "job-lost") {
+        void (async () => {
+          await wait(stepMs);
+          emit("rabita:progress", { job: 1, step: "detect", state: "done", message: DONE.detect[1] });
+          emit("rabita:progress", { job: 1, step: "packages", state: "running", message: "" });
+          await wait(stepMs * 2);
+          // What the app's watchdog sends when the helper goes away.
+          finish(1, {
+            ok: false, steps: [], lost_contact: true,
+            summary: "Rabita Setup lost contact with its background service before this finished: the service stopped or was restarted. The computer may be partly set up. Close Rabita Setup and open it again: it shows what state the computer is in and what can be finished or undone.",
+          });
+        })();
+        return 1;
+      }
       void runJob(1, JOIN, failAt);
       return 1;
     },

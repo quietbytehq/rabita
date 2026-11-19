@@ -340,6 +340,42 @@ async function leave(page, { remove = true, user = "admin", password = "pw" } = 
   await page.close();
 }
 
+// 15. The background service does not answer: a clear reason, and Try again.
+{
+  const page = await open("helper-silent");
+  await page.getByText("Rabita Setup can't check this computer.").waitFor();
+  await page.getByText("did not answer within 30 seconds").waitFor();
+  await page.getByText("leftover test installation").waitFor();
+  assert.ok(await disabled(page, "next"), "nothing can go ahead without the service");
+  assert.equal(await page.locator(".working").count(), 0, "no spinner left running");
+  await shot(page, "15-service-not-answering");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await page.getByText("Ubuntu 24.04.1 LTS").waitFor();
+  assert.ok(!(await disabled(page, "next")));
+  assert.ok(await page.locator("#extra").isHidden(), "Try again goes away once it works");
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
+// 16. The service goes away during a job: the checklist stops, and says what to do.
+{
+  const page = await open("job-lost");
+  await page.getByText("Ubuntu 24.04.1 LTS").waitFor();
+  await walkToOptions(page);
+  await page.getByRole("button", { name: "Next ›" }).click();
+  await page.fill("#admin-user", "joiner");
+  await page.fill("#password", "pw");
+  await page.getByRole("button", { name: "Next ›" }).click();
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByText("Rabita Setup lost track of this job").waitFor();
+  await page.getByText("open it again").waitFor();
+  assert.ok(await page.locator("#back").isHidden(), "no going back to a half-done join");
+  assert.ok(await page.locator("#extra").isHidden(), "no Finish setup on a guess");
+  assert.ok(await page.getByRole("button", { name: "Close" }).isVisible());
+  assert.deepEqual(page.errors, []);
+  await page.close();
+}
+
 // 14. Every screen fits the 800×560 window without scrolling the page.
 {
   for (const scenario of ["joined", "long-name", "joined-unfinished"]) {

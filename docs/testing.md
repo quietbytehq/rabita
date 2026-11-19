@@ -57,7 +57,11 @@ git clone https://github.com/quietbytehq/rabita.git && cd rabita && git checkout
 scripts/dev-install.sh
 ```
 
-Expected: ends with "Installed. Next: …". Check the policy files landed:
+Expected: ends with "Installed. Next: …". It refuses if the rabita package
+is installed (remove the package first). The development build runs as its
+own service, `rabita-helper-dev.service`; it never writes
+`/etc/systemd/system/rabita-helper.service`, which would replace the
+package's service. Check the policy files landed:
 
 ```bash
 ls -l /usr/share/polkit-1/actions/org.quietbyte.rabita.policy /usr/share/dbus-1/system.d/org.quietbyte.Rabita1.conf
@@ -341,7 +345,9 @@ works (root is always authorised).
 scripts/dev-uninstall.sh
 ```
 
-Then restore the VM snapshot.
+It also removes what older versions of `dev-install.sh` wrote, and leaves
+files that belong to an installed rabita package alone. Then restore the VM
+snapshot.
 
 ### Fallbacks
 
@@ -374,8 +380,8 @@ through the six screens without a terminal. Screenshots of every screen are
 in `docs/screenshots/`.
 
 Start from a fresh Ubuntu 24.04 (or 26.04) snapshot with GNOME, DNS pointing
-at the DC, as for Milestone 2. Do **not** install the Milestone 2 dev build
-on the same snapshot.
+at the DC, as for Milestone 2. Prefer a snapshot without the Milestone 2 dev
+build; if a VM has one, see *G0* below.
 
 ### 1. Get the package
 
@@ -511,6 +517,26 @@ do, used to cause a fault on purpose.
 - Snapshot both VMs before starting, and restore the snapshot between the
   numbered parts when it says *fresh snapshot*.
 - Have **Active Directory Users and Computers** open on the DC.
+
+### G0. A VM that had a development build (once per such VM)
+
+An older `scripts/dev-install.sh` wrote
+`/etc/systemd/system/rabita-helper.service`, which replaced the package's own
+service and made Rabita Setup wait forever. The package now deals with it.
+
+- [ ] On a VM where the old dev build was installed (and not removed),
+      install the `.deb` by double-click (G1). Open Rabita Setup: Welcome
+      appears normally, within a few seconds.
+- [ ] *Lab only, to confirm:* in Files, open `/etc/systemd/system`:
+      `rabita-helper.service` is gone and `rabita-helper.service.rabita-dev-disabled`
+      is there instead. The system log (Logs app, search *rabita*) has a line
+      saying it was moved out of the way.
+- [ ] *Lab only, to see the error the old way round:* rename the
+      `.rabita-dev-disabled` file back, restart, and open Rabita Setup.
+      Within about 30 seconds Welcome shows *Rabita Setup can't check this
+      computer*, says the background service did not answer, names the
+      leftover file, and says what to do. **Try again** repeats the check.
+      Nothing spins forever. Reinstall the package to clear it again.
 
 ### G1. Install by double-click
 
@@ -731,6 +757,18 @@ disconnect the DC's network card (or shut the DC down).
       → password. KDE: Discover → **Installed** → Rabita Setup → **Remove**.
 - [ ] The menu entry disappears. Leave the domain **before** uninstalling;
       if you forget, reinstall Rabita and use Leave domain.
+
+### G13. Rabita Setup never waits forever
+
+- [ ] On *Setting up*, while packages install, use the Proxmox console of the
+      VM to stop the background service as a crash would (*lab only*: `sudo
+      systemctl kill rabita-helper`). Within about 30 seconds the window
+      shows *Rabita Setup lost track of this job* and says to close and
+      reopen it. Reopen it: Welcome or Status shows the real state, and
+      **Finish setup** or **Undo changes** is offered where it applies.
+- [ ] Leave the desktop's password window open without answering for 5
+      minutes: it closes by itself and Rabita says nobody answered, and
+      that nothing was changed.
 
 ### Known limits of the GUI-only path
 

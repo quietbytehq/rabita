@@ -121,6 +121,9 @@ export interface JobResult {
   remaining_steps: string[];
   /** Leave: the computer account is still in the directory. */
   left_locally_only: boolean;
+  /** Set by the app, not the helper: the helper stopped answering or went
+   *  away before the job's result arrived. */
+  lost_contact?: boolean;
 }
 
 export interface HealthCheck {

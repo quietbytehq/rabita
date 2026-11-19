@@ -361,7 +361,13 @@ export interface FinishView {
 }
 
 /** What the Finish screen says about a job result. */
+/** Title when the helper went away before a job's result arrived. */
+export const LOST_TITLE = "Rabita Setup lost track of this job";
+
 export function finishView(result: JobResult, domain: string): FinishView {
+  if (result.lost_contact === true) {
+    return { tone: "warn", title: LOST_TITLE, body: result.summary, problem: null, remaining: [], canFinishSetup: false, backTo: null };
+  }
   if (result.ok) {
     return {
       tone: "ok",
@@ -416,6 +422,9 @@ export interface LeaveView {
 
 /** What the screen after Leave (or Undo) says. */
 export function leaveView(result: JobResult, domain: string, undo: boolean): LeaveView {
+  if (result.lost_contact === true) {
+    return { tone: "warn", title: LOST_TITLE, body: result.summary, backTo: null, canRetry: false };
+  }
   if (result.ok && undo) {
     return { tone: "ok", title: "Changes undone", body: result.summary, backTo: null, canRetry: false };
   }

@@ -8,6 +8,7 @@
 //! shows the usual password dialog when the helper needs permission.
 
 mod bridge;
+mod diagnose;
 
 fn main() {
     if bridge::running_as_root() {
